@@ -1,6 +1,6 @@
 import { StringCache } from "../search/cache.js";
 
-export type RenderMode = "direct" | "flaresolverr" | "playwright";
+export type RenderMode = "direct" | "flaresolverr" | "playwright" | "wayback";
 
 /** 规范化 URL 作缓存键：去 fragment + 跟踪参数 */
 export function normalizeCacheUrl(url: string): string {
@@ -28,6 +28,7 @@ export class FetchCache {
       direct: new StringCache(maxEntries, ttlMs),
       flaresolverr: new StringCache(maxEntries, ttlMs),
       playwright: new StringCache(maxEntries, ttlMs),
+      wayback: new StringCache(maxEntries, ttlMs),
     };
   }
 

@@ -5,6 +5,7 @@ import { renderWithPlaywright } from "../browser/render.js";
 import { ErrorCodes, withCode } from "../utils/errors.js";
 import { Semaphore } from "../utils/semaphore.js";
 import { FetchCache, type RenderMode } from "./cache.js";
+import { fetchViaWayback } from "./wayback.js";
 import { baseContentType, formatBytes, renderTextBody } from "./convert.js";
 import { directFetch, type DirectFetchResult } from "./direct.js";
 import { createFlareSolverrClient, type FlareSolverrClient } from "./flaresolverr.js";
@@ -29,11 +30,16 @@ export interface FetchService {
 
 /** 空壳 JS 判定：HTML 很短且含 script src（疑似 SPA 壳）或含 CF 挑战特征 */
 function isShellJs(html: string): boolean {
-  if (html.length > 2000) return false;
   const lower = html.toLowerCase();
-  const hasScript = /<script[^>]*\ssrc=/.test(lower);
-  const cfFeatures = /cf-challenge|just a moment|challenge-platform|cf-browser-verification|_cf_chl/.test(lower);
-  return hasScript || cfFeatures;
+  // 挑战页特征优先判定：CF/JS 挑战壳不论多大都是壳。
+  // 原实现把长度门限放在最前，导致 2KB 以上的验证页（真实场景常见 3–8KB）
+  // 一律判非壳、不升级 FlareSolverr，最终把验证页当正文返回。
+  const cfFeatures = /cf-challenge|just a moment|challenge-platform|cf-browser-verification|_cf_chl|verify-wrapper|blockpuzzle/
+    .test(lower);
+  if (cfFeatures) return true;
+  // 小页面 + 外链脚本：典型 SPA 空壳（长度门限只作用于这一类判定）
+  if (html.length > 2000) return false;
+  return /<script[^>]*\ssrc=/.test(lower);
 }
 
 function shouldUpgradeToFlareSolverr(config: GatewayConfig, direct: DirectFetchResult): boolean {
@@ -183,6 +189,39 @@ export function createFetchService(
     }
     if (direct.ok && direct.kind === "text") {
       return renderText(direct, params.url, maxChars);
+    }
+
+    // ①.5 Wayback 兜底：仅当原页面明确「不存在」（404 / 410）时查存档。
+    // 403/429 是反爬、不是删除，翻存档只会拿到错误的东西，所以不在这里触发。
+    if (
+      config.fetchWaybackEnabled &&
+      !direct.ok &&
+      direct.errorKind === "http" &&
+      (direct.status === 404 || direct.status === 410)
+    ) {
+      const wbCached = cachedGet("wayback", params.url, maxChars);
+      if (wbCached !== undefined) {
+        logger.debug(`fetch cache hit (wayback): ${params.url}`);
+        return { ok: true, text: wbCached };
+      }
+      const wb = await fetchViaWayback(
+        params.url,
+        config.fetchWaybackTimeoutMs,
+        config.fetchWaybackApiBase,
+      );
+      if (wb.ok && wb.html) {
+        const md = await renderWithHtml(wb.html, wb.finalUrl ?? params.url, maxChars);
+        const t = wb.timestamp ?? "";
+        const day = t.length >= 8 ? `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}` : t;
+        const full =
+          md +
+          (md.endsWith("\n") ? "" : "\n") +
+          `\n> 注：原页面返回 HTTP ${direct.status}，以下内容取自 Wayback Machine 存档${day ? `（${day}）` : ""}。`;
+        cachedSet("wayback", params.url, full, maxChars);
+        logger.debug(`fetch wayback hit: ${params.url} -> ${wb.finalUrl}`);
+        return { ok: true, text: full };
+      }
+      logger.debug(`fetch wayback miss: ${params.url} (${wb.errorMessage ?? "unknown"})`);
     }
 
     // ② CF 判定：命中才升级到 FlareSolverr

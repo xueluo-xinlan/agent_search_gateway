@@ -1,8 +1,40 @@
-# agent_search_gateway
+# agent_search_gateway（增强版）
 
-统一搜索/抓取网关：一个 **MCP server（HTTP transport）**，把搜索、网页抓取、浏览器交互封装成稳定的 agent 工具。
+> **本项目基于 [djasdh/agent_search_gateway](https://github.com/djasdh/agent_search_gateway)（MIT）修改。**
+> 原项目版权归 djasdh 所有；本仓库的修改部分同样以 MIT 发布，完整改动见 [PATCHES.md](PATCHES.md)。
 
-面向 3.8GB 小服务器，全自托管，轻量。
+统一搜索/抓取网关：一个 **MCP server**，把搜索、网页抓取、浏览器交互封装成稳定的 agent 工具。
+
+面向 3–4 GB 小服务器，全自托管，轻量。
+
+## 相比上游的改动
+
+### Bug 修复（两处均为上游真实缺陷）
+
+| 问题 | 症状 | 修法 |
+|---|---|---|
+| **空壳判定顺序错误** | `isShellJs` 把「HTML 长度 > 2000」放在最前，导致 2 KB 以上的 Cloudflare 验证页被判为非壳、不升级渲染，**最终把验证页当正文返回** | 挑战特征优先判定；长度门限只约束「小页面 + 外链脚本」这一类 |
+| **反向图搜污染结果集** | `categories=search_by_image` 时仍向 SearXNG 发请求；若 SearXNG 没有 `tineye`，会退化成普通关键词搜索，把**图片 URL 当搜索词**，返回一堆无关文本结果 | 反向图搜时若 SearXNG 无图片引擎，跳过它，只走网关侧图源 |
+
+### 新增能力
+
+| 能力 | 说明 |
+|---|---|
+| **Wayback 兜底** | `direct` 返回 404/410 时查 archive.org 存档，命中则返回存档正文并标注来源（403/429 不触发——那是反爬不是删除） |
+| **健康四态** | `on` / `down` / `unverified` / `off`。区分「曾经成功过后来挂了」与「从来没成功过」，后者通常意味着配置写错 |
+| **METRICS 落盘** | 每次检索写 JSONL（query / 条数 / 耗时 / 引擎分布 / 降级标记） |
+
+### 部署适配
+
+| 改动 | 原因 |
+|---|---|
+| stdio 传输 + 日志走 stderr | MCP client 以 `--stdio` 拉起时，stdout 只能承载 JSON-RPC |
+| 配置路径四级回退 | 从任意 cwd 启动都能找到 `gateway.yaml` |
+| Tavily → DDG 兜底 | 上游已移除该能力，本部署依赖 |
+| `ads+porn` 过滤档 | 曾因 zod 静默降级为 `ads`，防护面少一半 |
+| corpus TTL 校验 | 字段存在但代码不校验，过期条目仍会被召回 |
+
+Windows 第二通道（住宅 IP）的部署脚本与三个专属坑见 [`deploy/pc/README.md`](deploy/pc/README.md)。
 
 ## 架构
 
@@ -11,13 +43,13 @@ Agent（hermes / OpenCode / my-agent-core / 其它 MCP client）
   │  MCP over HTTP
   ▼
 gateway (本服务, :3000/mcp)
-  ├─ search → searxng (:8888) → 清洗/广告过滤/缓存 → 纯 md
+  ├─ search → searxng (:8890) → 清洗/广告过滤/语义召回/重排 → 纯 md
   ├─ fetch  → 按 Content-Type 分派：
   │     网页 HTML→md；文本类直出/轻转换（JSON/CSV/XML）
   │     PDF → 抽正文（unpdf）
   │     图片等二进制 → 落盘 data/downloads + /files/<id> 链接
-  │     网页自动路由 direct → FlareSolverr (:8192) → playwright
-  │     fetch 缓存按渲染方式隔离
+  │     网页自动路由 direct → (404/410) Wayback 存档 → FlareSolverr (:8191) → playwright
+  │     fetch 缓存按渲染方式隔离：direct / flaresolverr / playwright / wayback
   ├─ browser_* → 内嵌 playwright（agent 交互：navigate/click/type/scroll/find/screenshot）
   └─ health → 各后端连通状态
 ```
@@ -39,7 +71,7 @@ gateway (本服务, :3000/mcp)
 | `browser_click` / `browser_type` | 点击/输入，返回无障碍树 |
 | `browser_scroll` / `browser_find` | 滚动 / 搜索页面文本 |
 | `browser_close` | 关闭浏览器释放资源 |
-| `health` | 各后端连通状态 |
+| `health` | 各后端连通状态，四态：`on`（本次成功）/ `down`（曾成功过、现失败）/ `unverified`（从未成功过，多半是配置错）/ `off`（未启用）。响应含 `lastOkAt`，`unverified` 时该字段缺失 |
 
 ## 错误码
 
@@ -216,6 +248,30 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 
 > 并发作用域：`flaresolverr.max_concurrent` 是**全进程**上限（所有 MCP 会话合计，防止 Chromium 内存线性放大）；`search.max_concurrent` 仍是**每会话**上限（多会话聚合为 N×值，只影响延迟）。
 
+### Wayback 兜底（404/410）
+
+取件链：`direct → (404/410 ? Wayback) → FlareSolverr → playwright`。
+
+**只在原页面明确「不存在」时触发**：403/429 是反爬而非删除，翻存档只会拿到错误内容。
+
+```
+1. GET https://archive.org/wayback/available?url=<原URL>
+2. 有快照 → 抓快照页（静态页，普通 HTTP 即可）
+3. 转 markdown，末尾标注「原页面返回 HTTP 404，以下内容取自 Wayback Machine 存档（YYYY-MM-DD）」
+```
+
+```yaml
+fetch:
+  wayback:
+    enabled: true        # 关掉则 404 原样报错
+    timeout_ms: 5000
+    api_base: https://archive.org/wayback/available   # 仅测试注入用
+```
+
+- 快照超过 5 MB 放弃；
+- archive.org 不可达时静默失败，不影响原错误返回；
+- 缓存按 `wayback` 档位独立分键，不与 direct 混用。
+
 ### fetch 全类型与产物落盘
 
 `fetch` 按响应的 `Content-Type` 分派，不再只认网页：
@@ -350,7 +406,7 @@ corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 
 ## 测试与压测
 
-- `npm test`：256 个测试（30 个测试文件）
+- `npm test`：365 个测试（37 个测试文件）
 - `scripts/bench.sh`：测量各组件内存/延迟，验证 3.8GB 预算
 
 实测（本机模拟）：

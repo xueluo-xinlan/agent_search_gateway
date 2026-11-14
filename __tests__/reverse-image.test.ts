@@ -277,6 +277,8 @@ let searxCategories: string[] = [];
 let searxEngines: Array<string | null> = [];
 let searxQueries: string[] = [];
 let searxFail = false;
+/** searxng /config 返回的已启用引擎名；默认带 tineye（图片引擎） */
+let searxEngineNames: string[] = ["tineye", "exaapi"];
 let searxResults: Array<Record<string, unknown>> = [];
 
 // mock 图床（uguu/pomf 协议）；记录收到的 multipart 原文以便断言
@@ -363,7 +365,9 @@ beforeAll(async () => {
     const url = new URL(req.url ?? "/", "http://localhost");
     res.setHeader("Content-Type", "application/json");
     if (url.pathname === "/config") {
-      res.end(JSON.stringify({ engines: [{ name: "exaapi", enabled: true }] }));
+      // 默认带 tineye：反向图搜的设计意图就是「有图片引擎才转发给 searxng」。
+      // 个别用例会临时清空它，验证「无图片引擎时跳过 searxng」。
+      res.end(JSON.stringify({ engines: searxEngineNames.map((n) => ({ name: n, enabled: true })) }));
       return;
     }
     searxQueries.push(url.searchParams.get("q") ?? "");
@@ -574,6 +578,25 @@ describe("createSearchService 反向图搜扇出（ADR-0010）", () => {
     expect(r.ok).toBe(true);
     expect(lastTraceQuery).toBeUndefined();
     expect(r.text).not.toContain("反向图搜");
+  });
+
+  it("searxng 无图片引擎（tineye 未启用）→ 跳过 searxng，只走网关侧图源", async () => {
+    // 本机 SearXNG 只启用了文本引擎时，把图片 URL 发给它会被当成关键词搜索，
+    // 返回一堆无关页面污染结果集。此时应完全不请求 searxng。
+    searxEngineNames = ["exaapi"];
+    try {
+      traceMode = "ok";
+      searxFail = false;
+      searxQueries = [];
+      searxCategories = [];
+      const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+      const r = await svc.search({ query: IMG, categories: "search_by_image" });
+      expect(r.ok).toBe(true);
+      expect(searxQueries.length).toBe(0); // 一次都没打到 searxng
+      expect(r.text).toContain("tracemoe"); // 网关侧图源照常参与
+    } finally {
+      searxEngineNames = ["tineye", "exaapi"];
+    }
   });
 });
 

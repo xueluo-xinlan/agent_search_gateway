@@ -64,6 +64,18 @@ describe("CorpusStore (sqlite-vec)", () => {
     s.close();
   });
 
+  it("knn 不召回已过期条目（gc 尚未运行时也要挡住）", async () => {
+    // 回归：knn 原先只按 namespace+url 过滤，gc 是周期性的 —— 在它跑之前，
+    // 一个月前抓的旧内容仍会被当新鲜结果召回（2026-11-03 修）。
+    const s = createCorpusStore({ path: tmpDb(), namespace: "ns", dim: 4, ttlMs: 50 })!;
+    s.put([{ url: "old", title: "旧", content: "旧内容", fetchedAt: 1, vec: v([1, 0, 0, 0]) }]);
+    expect(s.knn(v([1, 0, 0, 0]), 1)).toHaveLength(1);   // 未过期时可召回
+    await new Promise((r) => setTimeout(r, 80));        // 等过期，但**不跑 gc**
+    expect(s.knn(v([1, 0, 0, 0]), 1)).toHaveLength(0);
+    expect(s.stats().entries).toBe(1);                  // 证明不是 gc 删掉的
+    s.close();
+  });
+
   it("命名空间隔离：不同命名空间互不可见", () => {
     const path = tmpDb();
     const a = createCorpusStore({ path, namespace: "p:m@4:A", dim: 4, ttlMs: 100000 })!;

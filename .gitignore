@@ -1,22 +1,24 @@
+# 依赖与构建产物
 node_modules/
 dist/
-.env
-*.log
-data/adblock/hosts
-data/corpus/
-data/downloads/
-data/bilibili.sqlite*
-# 实例配置（含环境相关项，不入库；模板见 gateway.yaml.example）
+
+# 配置与密钥（必须自己保留，不入库）
 gateway.yaml
+.env
+*.env
+
+# 运行期数据
+data/
+*.bak-*
+*.log
 .tmp/
-# callgraph 生成产物/调试工具
+
+# 上游已有
+data/adblock/hosts
 docs/callgraph.mmd
 scripts/callgraph-data.json
 scripts/gen-callgraph.mjs
-# Python 缓存（searxng-ext 的本地编译/测试产物）
+
+# Python 字节码（可能内嵌绝对路径）
 __pycache__/
 *.pyc
-# 评测/基准产物(工作文件,不入库;harness 本身保留)
-eval/report*.md
-eval/report*.json
-eval/matrix/

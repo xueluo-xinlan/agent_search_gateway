@@ -1,6 +1,6 @@
 import { loadConfig } from "./config.js";
 import { Logger } from "./logger.js";
-import { closeGatewayRuntime, createServer, startHttpServer } from "./server.js";
+import { closeGatewayRuntime, createServer, startHttpServer, startStdioServer } from "./server.js";
 
 function loadConfigOrExit() {
   try {
@@ -12,12 +12,33 @@ function loadConfigOrExit() {
 }
 
 async function main(): Promise<void> {
+  // stdio 传输（本部署适配）：Hermes 以 `--stdio` 拉起本网关。
+  const isStdio = process.argv.includes("--stdio") || process.env.GATEWAY_TRANSPORT === "stdio";
   const config = loadConfigOrExit();
 
-  const logger = new Logger(config.logLevel, config.logFile);
-  logger.info(`config loaded: host=${config.host} port=${config.port} searxng=${config.searxngUrl} flaresolverr=${config.flaresolverrUrl} token=${config.token ? "set" : "none"}`);
+  // stdio 下 stdout 必须 100% 留给 JSON-RPC，日志改走 stderr
+  const logger = new Logger(config.logLevel, config.logFile, isStdio);
+  logger.info(`config loaded: mode=${isStdio ? "stdio" : "http"} host=${config.host} port=${config.port} searxng=${config.searxngUrl} flaresolverr=${config.flaresolverrUrl} token=${config.token ? "set" : "none"}`);
 
   try {
+    if (isStdio) {
+      await startStdioServer({ config, logger }, createServer);
+      const shutdownStdio = async (signal: string) => {
+        logger.info(`received ${signal}, shutting down...`);
+        try {
+          await closeGatewayRuntime();
+        } catch (err) {
+          logger.error(`error closing gateway runtime: ${String(err)}`);
+        }
+        logger.close();
+        process.exit(0);
+      };
+      process.on("SIGTERM", () => void shutdownStdio("SIGTERM"));
+      process.on("SIGINT", () => void shutdownStdio("SIGINT"));
+      logger.info("gateway ready in stdio mode (MCP client connected)");
+      return;
+    }
+
     const http = await startHttpServer({ config, logger }, createServer);
 
     const shutdown = async (signal: string) => {

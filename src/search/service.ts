@@ -1,7 +1,8 @@
 import type { GatewayConfig } from "../config.js";
 import type { DomainFilter } from "../filter/domain-filter.js";
 import { isBlocked } from "../filter/domain-filter.js";
-import { readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Logger } from "../logger.js";
 import { ErrorCodes, withCode } from "../utils/errors.js";
 import { Semaphore } from "../utils/semaphore.js";
@@ -24,6 +25,7 @@ import {
 } from "./reverse-image.js";
 import { searchSaucenao } from "./saucenao.js";
 import type { ImageInput, SourceCall } from "./sources.js";
+import { searchFallback } from "./fallback.js";
 import {
   searchSearxng,
   type SearchCallError,
@@ -349,6 +351,43 @@ export interface SearchDeps {
  * 单次搜索的分阶段耗时（ms），供瓶颈定位。
  * 单位均 ms；`residualMs` = total − 其余显式阶段之和（缓存写回/JSON 序列化等）。
  */
+/**
+ * 留痕落盘路径。
+ *
+ * Linux 默认写 `/var/lib/research/runs.jsonl`；Windows 默认关闭（PC 上没有该目录，
+ * 且 PC 侧网关的留痕由 VPS 汇总即可）。可用 `HERMES_RESEARCH_METRICS` 覆盖。
+ */
+const METRICS_FILE =
+  process.env.HERMES_RESEARCH_METRICS ??
+  (process.platform === "linux" ? "/var/lib/research/runs.jsonl" : "");
+
+/**
+ * 把一次搜索的时序落到 JSONL（与 scripts/research_metrics.py 的 schema 对齐）。
+ *
+ * 为什么放在网关里而不是靠调用方记：2026-11-03~06 三天里，手工留痕只发生过 2 次。
+ * 「记得记录」这种约束必然失效——只有默认行为才可靠。
+ */
+function appendMetricsLine(m: SearchMetrics): void {
+  if (!METRICS_FILE) return;
+  try {
+    mkdirSync(dirname(METRICS_FILE), { recursive: true });
+    const rec = {
+      ts: new Date().toISOString(),
+      query: m.query,
+      channels: {
+        gateway: { results: m.upstreamRaw, ms: Math.round(m.totalMs) },
+      },
+      degraded: m.degraded,
+      engines: m.engineCounts,
+      cacheHit: m.cacheHit,
+      mergeMs: Math.round(m.mergeMs),
+    };
+    appendFileSync(METRICS_FILE, JSON.stringify(rec) + "\n");
+  } catch {
+    /* 落盘失败绝不影响搜索本身 */
+  }
+}
+
 export interface SearchMetrics {
   query: string;
   cacheHit: boolean;
@@ -488,6 +527,7 @@ export function createSearchService(
       /* 打点失败不影响搜索 */
     }
     metricsSink?.(m);
+    appendMetricsLine(m);
   };
 
   async function search(params: SearchParams): Promise<SearchOutcome> {
@@ -657,7 +697,25 @@ export function createSearchService(
     }
     // 发给 searxng 的 query：URL 输入用它自己；本地图用发布到的公网 URL；
     // 本地图且没发布成功 → 没有可给 TinEye 的公网 URL，searxng 这一半跳过。
-    const upstreamQuery = localImage ? (publish?.ok ? publish.url : undefined) : effParams.query;
+    // 反向图搜：searxng 侧只有 tineye 这类图片引擎才对「把图片 URL 当查询」有意义。
+    // 本机 SearXNG 没启用 tineye 时，请求发过去会被当作普通关键词搜索，
+    // 返回一堆以 URL 字符串命中的无关页面，把结果集污染掉（实测 360search/bing/yandex）。
+    // 此时跳过 searxng，只保留网关侧图源（tracemoe / saucenao / baidu）。
+    // enabled 为 undefined（引擎列表加载失败）时按「可用」处理，保持旧行为，不误跳。
+    const SEARXNG_IMAGE_ENGINES = new Set(["tineye"]);
+    const searxngImageEngineAvailable =
+      enabled === undefined || Array.from(enabled).some((e) => SEARXNG_IMAGE_ENGINES.has(e));
+    const skipSearxngForReverseImage = reverseImage && !searxngImageEngineAvailable;
+    if (skipSearxngForReverseImage) {
+      logger.debug("反向图搜：searxng 无图片引擎（tineye 未启用），跳过 searxng 以免污染结果");
+    }
+    const upstreamQuery = skipSearxngForReverseImage
+      ? undefined
+      : localImage
+        ? publish?.ok
+          ? publish.url
+          : undefined
+        : effParams.query;
     if (upstreamQuery === undefined) {
       logger.debug("反向图搜：本地图未获得公网 URL，跳过 searxng（tineye 不参与）");
     }
@@ -702,6 +760,30 @@ export function createSearchService(
           logger.debug(
             `rotating candidate "${batch.rotating.join(",")}" produced no results, trying next batch`,
           );
+        }
+      }
+
+      // 兜底检索（本部署自定义）：上游所有批次都没成功时补一次 Tavily → DDG 直连。
+      // 放在批次循环之后而不是循环里，避免每个失败批次都打一次外部 API。
+      if (!lastData && upstreamQuery !== undefined && config.searchFallback) {
+        try {
+          logger.warn(`上游全部批次失败（${lastError?.kind ?? "unknown"}），启用兜底检索`);
+          const fb = await searchFallback(
+            {
+              query: upstreamQuery,
+              language: effParams.language,
+              safeSearch: effParams.safeSearch,
+              categories: effParams.categories,
+            },
+            config,
+            logger,
+          );
+          if (fb.results.length > 0) {
+            lastData = fb;
+            logger.info(`兜底检索返回 ${fb.results.length} 条`);
+          }
+        } catch (err) {
+          logger.warn(`兜底检索失败: ${String(err)}`);
         }
       }
 

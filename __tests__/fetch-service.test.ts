@@ -93,6 +93,15 @@ beforeAll(async () => {
       // 空壳 SPA
       res.writeHead(200, { "Content-Type": "text/html" });
       res.end("<html><head><title>SPA</title></head><body><div id='app'></div><script src='/bundle.js'></script></body></html>");
+    } else if (url.pathname === "/shell-big") {
+      // 大体积 CF 挑战页（>2KB）：旧实现先判长度、直接 return false，
+      // 会把这类真实场景里常见的验证页当正文返回。此路由专门防这个回归。
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(
+        "<html><head><title>Just a moment...</title></head><body>"
+          + "<div class='cf-browser-verification'>checking your browser</div>".repeat(80)
+          + "</body></html>",
+      );
     } else if (url.pathname === "/missing404") {
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end("<html><body>not found</body></html>");
@@ -157,6 +166,15 @@ describe("createFetchService 路由", () => {
     const svc = createFetchService(cfg, silentLogger);
     const before = fsCalled;
     const r = await svc.fetch({ url: `${targetBase}/shell` });
+    expect(r.ok).toBe(true);
+    expect(fsCalled).toBe(before + 1);
+  });
+
+  it("大体积验证页（>2KB）→ 同样升级 FlareSolverr", async () => {
+    const cfg = makeConfig({ flaresolverrUrl: fsBase });
+    const svc = createFetchService(cfg, silentLogger);
+    const before = fsCalled;
+    const r = await svc.fetch({ url: `${targetBase}/shell-big` });
     expect(r.ok).toBe(true);
     expect(fsCalled).toBe(before + 1);
   });

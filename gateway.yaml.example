@@ -1,105 +1,63 @@
-# agent_search_gateway 网关配置（整体 yaml）
-# 复制为 gateway.yaml 使用。token 建议用环境变量 GATEWAY_TOKEN 注入，避免写文件。
+# agent_search_gateway 配置示例
+#
+# 用法：复制为 gateway.yaml 再按需修改。
+#   cp gateway.yaml.example gateway.yaml
+#
+# 所有密钥留空 = 对应能力不启用（不会报错，只是该功能静默跳过）。
+# 也可以不写进本文件，改用环境变量注入（见 README 的「密钥」一节）。
+#
+# 本文件由真实部署配置脱敏生成：密钥清空、绝对路径替换为占位符。
 
 gateway:
   host: 127.0.0.1
   port: 3000
-  # token 请勿写在此文件（会提交到仓库）。用环境变量 GATEWAY_TOKEN 注入：
-  #   export GATEWAY_TOKEN=your-secret
-  # 留空 = 不认证；设置了 env GATEWAY_TOKEN 会优先于此处。
   token: ""
-
 logging:
-  level: info          # debug | info | warn | error
-  file: ""             # 空=输出到 stdout，否则写文件
-
+  level: info
+  file: ''
 searxng:
-  url: http://127.0.0.1:8888
-  timeout_ms: 25000   # 整次搜索的闸；须 ≥ 类别超时（见 search.category_timeout_ms），否则引擎会被掐死
-
+  url: http://127.0.0.1:8890
+  timeout_ms: 20000
 flaresolverr:
-  url: http://127.0.0.1:8192
-  enabled: true            # 路由②（CF/JS 渲染）总开关
-  timeout_ms: 60000        # FlareSolverr 请求超时
-  max_concurrent: 2        # 全进程并发上限（保护 FlareSolverr / Chromium；所有 MCP 会话合计）
+  url: http://127.0.0.1:8191
+  enabled: true            # 2026-11-03 接通：PC(amia) 的 FlareSolverr 经 SSH 转发到 VPS:8191（pc-forward-8191.timer 自愈）
+  timeout_ms: 20000        # 请求超时：PC 离线时最多等 20s（原 60s 会把 403 抓取拖死）
+  max_concurrent: 2        # 并发信号量（保护浏览器资源）
   trigger_status: [403, 405, 429]   # direct 这些状态 → 升级 FlareSolverr
   fallback_on_empty: true  # direct 200 但空壳 JS → 升级
-
 search:
   max_results: 10
-  # num_results 的单一上限：agent 请求超过即按此截断（不报错），并在结果末尾附加说明。
-  max_results_cap: 50
   max_result_chars: 500
-  cache_ttl_ms: 300000    # 5 分钟
-  cache_max_entries: 200
-  max_concurrent: 2       # 搜索并发信号量
-  # 引擎分档：
-  #   resident 每次查询都叠加（额度接近耗尽才移出）；rotating 按 fanout 轮换、失败静默换下一家。
-  #   （也兼容旧写法：engines: [a, b, c] 平铺数组 == 全部轮换、resident 为空。）
-  engines:
-    resident: [zhihu, "zhihu web", bilibili]
-    rotating: [exaapi, tavily, firecrawl]
-  fanout_default: 1       # 默认扇出 1 家；选中引擎无结果/不可用时自动换下一家（仅作用于 rotating）
-  # §9 配额台账（searxng quota 插件写入，网关消费）：
-  #   剔除已耗尽引擎；fanout>1 时按剩余额度降序取前 N；整体余额紧张时扇出压回 1
-  quota_enabled: true
-  quota_ledger_path: ~/.config/agent-search/quota.json
-  quota_tight_threshold: 0.1   # 候选引擎整体剩余占比低于该值 → 扇出压回 1
-  resident_quota_floor: 0.2    # resident 引擎剩余占比低于该值 → 从常住档移出
-  # 类别感知超时：命中请求类别时覆盖上面的 searxng.timeout_ms（学术引擎更慢）
-  # 指定非 general 类别时还会抑制 resident/rotating，交 searxng 按类别选引擎（ADR-0008）
-  # 须 ≥ 引擎自报的 timeout：cnki 按 page_size × num_pages 自算（默认 50 条 → 30s）
-  category_timeout_ms:
-    science: 40000
-    search_by_image: 25000   # 以图搜图：tineye 要等 TinEye 侧拉图，给足时间
-  # 以图搜图（reverse image search，ADR-0010/0011）：query 直接给图片 URL（http/https），
-  # 或改用 image_path 给本地图片路径（两者互斥；本地图只在以图搜图时可用）。
-  # searxng 侧由 tineye 引擎承担（需在 searxng 的 settings.yml 里给 tineye 声明该类别，见 README），
-  # 网关侧再并发扇出 sources 列的附加源；两边候选按 URL 去重合并后进现有排序。
+  cache_ttl_ms: 1800000
+  cache_max_entries: 500
+  max_concurrent: 2
+  fallback: true
+  tavily_api_key: ""
+  engines: []
+  fanout_default: 1
+  quota_enabled: false
+  # 反向图搜（ADR-0010/0012）：categories=search_by_image 时并发扇出下列图源。
+  # 本机 SearXNG 无 tineye，网关会自动跳过 searxng 以免把图片 URL 当关键词搜。
   reverse_image:
     enabled: true
-    category: search_by_image    # 触发类别（网关侧大小写不敏感，转发时用此规范名）
-    # 网关侧附加源：tracemoe（动画）/ saucenao（插画，需 api_key）/ baidu（中文图）；
-    # 置空 = 只走 searxng 的 tineye。三者默认全开（saucenao 未配 api_key 时自动跳过）。
+    category: search_by_image
     sources: [tracemoe, saucenao, baidu]
-    tracemoe_url: https://api.trace.moe
-    tracemoe_timeout_ms: 15000
-    tracemoe_max_results: 8      # 附加源候选上限（合并前）
-    local_max_bytes: 5242880     # image_path 读取上限（multipart 直传与图床发布共用）
-    # 本地图专用：tineye 要由 TinEye 服务器拉图，所以本地文件必须先发布到公网图床。
-    # ⚠️ 开启即代表允许把 image_path 指定的图片传到公网第三方（公网可见；uguu 3 小时后自动删，
-    #    并保留短时的上传 IP/文件名/哈希日志）。只有显式传 image_path 时才会用到。
-    # endpoint 用 uguu/pomf 上传协议：POST {endpoint}，multipart 字段 files[] → files[0].url。
-    publish:
-      enabled: true
-      endpoint: https://uguu.se/upload?output=json   # 也可指向自建 pomf/uguu 实例
-      timeout_ms: 20000
-    # SauceNAO：插画/同人图出处。api_key 为空 = 该源不启用（免费注册；实测免费账号 100 次/天、4 次/30 秒）
     saucenao:
       api_key: ""
-      url: https://saucenao.com
-      timeout_ms: 15000
-      max_results: 8
-      minsim: 30                   # 相似度下限 0-100（挡低分噪音）
-    # 百度识图：中文/国内图（抓网页，无 key、有风控；本机 IPv6 出口会被拒，网关 fetch 走 IPv4）
+      minsim: 60          # 低于 60% 多为同作品噪声，宁缺毋滥
     baidu:
       enabled: true
-      url: https://graph.baidu.com
-      timeout_ms: 15000
-      max_results: 8
-
+    publish:
+      # 本机 SearXNG 没有 tineye，发布到公网图床的唯一用途（喂 tineye 拉图）不存在，
+      # 开着只会：① 把用户的本地图上传到第三方图床（uguu.se）② 每次多等最多 20s。
+      # 三个图源都支持 bytes 直传，关掉不影响它们。
+      enabled: false
 rerank:
   enabled: true
-  # 轻量重排层：绕过 searxng 的 category 分组排序，按「score × boost」降序重排，
-  # 让被分组算法埋掉的高分结果（如带缩略图的 bilibili 视频）正常入场。
-  # key 用 searxng 注册名（JSON engine 字段），非 settings.yml 的 name；
-  # 默认 1.0，不配 = 按原始 score 排序。
-  # 提示：图片搜索（categories=images）同样走这里，可按需抬高图片引擎，
-  # 例如 "bing images": 1.2 / "duckduckgo images": 1.1。
   engine_boost:
-    bilibili: 1.0
-    "google cse": 1.0
-    bing: 1.0
+    bilibili: 1.2
+    google cse: 1.0
+    bing: 0.7
     duckduckgo: 1.0
     brave: 1.0
     wikipedia: 1.0
@@ -107,128 +65,76 @@ rerank:
     stackoverflow: 1.0
     reddit: 1.0
     news: 1.0
-
-  # 多样性重排层（语义向量就绪时生效；embedding/corpus 关闭则降级为引擎分顺序）：
-  #   MMR 贪心去冗余 + 同注册域(eTLD+1)上限，压住「同一来源占满 top-k」。
-  #   λ=1 → MMR 项失效，仅保留同域上限；先按综合分排序再按上限选择。
   diversity:
     enabled: true
-    mmr_lambda: 1.0        # 0=全多样，1=全相关（λ=1 时 MMR 项失效，只剩同域上限）
-    max_per_domain: 3      # 同一注册域最多几条
-
-  # 权威重排层（语义向量就绪时生效）：最终分 = rel_norm + weight·auth。
-  #   auth 按注册域/主机名的类别给分（gov/edu/官方文档≈0.95、可信大站≈0.7、UGC≈0.35、未知 0.5）。
-  #   与 diversity 正交：关闭时行为严格等于纯 cosine 序。默认关闭。
+    mmr_lambda: 0.7        # MMR 多样性；1.0 = 只按分排序
+    max_per_domain: 3      # 同一注册域最多 3 条
   authority:
     enabled: true
-    weight: 0.5            # 权威分权重；0=不生效
-
+    weight: 1.0            # 组合分 = rel_norm + weight × auth
 ad_filter:
   enabled: true
-  # off | ads | ads+tracking | full
-  level: ads
-  extra_domains: []        # 额外屏蔽域名（追加到 hosts 之上）
-  hosts_file: data/adblock/hosts
-  auto_update: true        # 启动时若 hosts 缺失/过期自动拉取
-  auto_update_interval_ms: 86400000   # 过期阈值 24h
-  # 保白名单：这些域名即使命中黑名单也保留（防误杀）
+  level: ads+porn
+  extra_domains: []
+  hosts_file: ""   # 例：/path/to/hosts-file
+  auto_update: true
+  auto_update_interval_ms: 86400000
   allowlist:
-    - uguu.se          # 以图搜图的本地图图床（发布出去的直链别被我们自己的过滤挡掉）
-    - wikipedia.org
-    - github.com
-    - github.io
-    - githubusercontent.com
-    - stackoverflow.com
-    - stackexchange.com
-    - reddit.com
-    - youtube.com
-    - google.com
-    - bing.com
-
+  - wikipedia.org
+  - github.com
+  - github.io
+  - githubusercontent.com
+  - stackoverflow.com
+  - stackexchange.com
+  - reddit.com
+  - youtube.com
+  - google.com
+  - bing.com
 fetch:
   timeout_ms: 15000
-  max_bytes: 5242880       # 响应体上限 5MB
-  user_agent: ""           # 空=默认 Chrome UA
-  block_private_ips: true  # SSRF 防护
-  private_ip_exempt_cidrs:  # 命中视为非私有（默认豁免 Clash fake-ip 段）
-    - 198.18.0.0/15
-    - fdfe:dcba:9876::/64
-  structural: clean        # clean(默认去导航/广告) | full(保留完整结构)
-  max_output_chars: 20000  # 输出 md 上限
-  cache_ttl_ms: 600000     # fetch 结果缓存 10 分钟
-  cache_max_entries: 200
-  max_download_bytes: 1073741824  # 非文本产物单文件上限 1GB（有 Content-Length 时下载前预检，超出报 FETCH_TOO_LARGE）
-  download_dir: data/downloads  # 产物落盘目录（容器内建议 /data/downloads）
-  download_ttl_ms: 604800000    # 产物 TTL 7 天
-  download_max_total_bytes: 4294967296  # 产物总量配额 4GB（超出按最旧优先清理）
-  files_route: true             # 提供 GET /files/<id> 下载链接（id = 内容 sha256）
-
-# B 站抓取（全部走 fetch，按 URL 类型自动判定；默认关闭）。
-# 视频/专栏 URL 直接返回摘要；#reply / #comment 抓评论。
-# 多后端按能力路由，失败自动换下一个；未安装后端时返回 BILI_UNAVAILABLE。
-bilibili:
-  enabled: false
-  routes:
-    detail: [cli-kukemc, cli-ytdlp, http]
-    comments: [cli-kukemc, http]
-    audio: [cli-ytdlp, http]          # 音频直链
-    article: [http]                   # 专栏正文目前只有 http 后端
-  cli_kukemc:
-    command: bili                     # kukemc/bili-cli；提供详情与评论
-    timeout_ms: 30000
-  cli_ytdlp:
-    command: yt-dlp                   # 提供详情与音频直链
-    cookies_file: ""                  # Netscape 格式；空=未登录（只能 480p）
-    probe_command: ""                 # 可选；空时首次请求兼作登录态探测
-    timeout_ms: 30000
-  http:
-    base_url: http://127.0.0.1:8010
-    token: ""                         # 与后端约定的 Bearer；只走环境变量注入更好
-    command: []                       # 非空时由插件拉起/回收，如 ["python","server.py","--port","8010"]
-    startup_timeout_ms: 10000
-    request_timeout_ms: 15000
-  auth_probe_ttl_ms: 60000
-  comment_db: data/bilibili.sqlite    # 评论本地库（全量检索用）
-  comments:
-    page_size: 20
-    search_limit: 50
-    max_pages_per_fetch: 20           # 单次 fetch 最多抓多少页，没抓完下次续传
-
+  max_bytes: 5242880
+  user_agent: ''
+  block_private_ips: true
+  private_ip_exempt_cidrs: []
+  structural: clean
+  max_output_chars: 20000
+  cache_ttl_ms: 3600000
+  cache_max_entries: 500
+  download_dir: ""   # 例：/path/to/download-dir
 browser:
-  enabled: true            # 浏览器能力（fetch 路由③ + browser_* 工具）
+  enabled: false
   headless: true
-  pool_size: 1             # 实例池上限
-  idle_ttl_ms: 360000      # 空闲 360s 自动关闭（可配）
+  pool_size: 1
+  idle_ttl_ms: 360000
   timeout_ms: 30000
   max_concurrent: 2
-  engine: chromium         # chromium | camoufox（camoufox 预留）
-  proxy_server: ""         # 代理预留
-  proxy_username: ""
+  engine: chromium
+  proxy_server: ''
+  proxy_username: ''
   proxy_password: ""
-  wait_for_selector: ""    # 渲染前等待该选择器（复杂 SPA）
+  wait_for_selector: ''
   screenshot:
     enabled: true
-    max_size: 512          # 截图最大边长像素（可配）
+    max_size: 512
     image_type: jpeg
-
-embedding:                 # 文本向量来源（外部服务），独立于 searxng
-  enabled: false           # 关闭时：不召回、不语义重排，行为同旧版
-  provider: openai         # openai（POST {base_url}/embeddings）| ollama（POST {base_url}/api/embed）
-  base_url: http://127.0.0.1:11434/v1
-  api_key: ""              # 建议用环境变量 EMBEDDING_API_KEY 注入
-  model: BAAI/bge-m3
-  dim: 0                   # 0=启动探针解析；>0 直接采用
+embedding:
+  enabled: true
+  provider: openai
+  base_url: http://127.0.0.1:8091/v1
+  api_key: ""
+  model: bge-small-zh-v1.5
+  dim: 512
   timeout_ms: 5000
-  batch_size: 32
-  concurrency: 4           # 单次 embed 内并发批次数上限（≥1，默认 4）
+  batch_size: 16
+  concurrency: 2
   max_input_chars: 2000
-  # 非空则覆盖内置模型 profile（如 e5 需 query:/passage: 前缀）
-  query_prefix: ""
-  passage_prefix: ""
-
-corpus:                    # 本地语料库（磁盘 sqlite-vec）；每次搜索恒开召回
-  enabled: false
-  store_path: data/corpus/corpus.db
-  ttl_ms: 2592000000       # 30 天
-  recall_k: 10             # KNN 召回上限（与上游按 URL 去重后进排序）
+  query_prefix: 为这个句子生成表示以用于检索相关文章：
+  passage_prefix: ''
+corpus:
+  enabled: true
+  store_path: ""   # 例：/path/to/store-path
+  ttl_ms: 2592000000
+  recall_k: 10
   sweep_interval_ms: 3600000
+bilibili:
+  enabled: false

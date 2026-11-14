@@ -11,6 +11,8 @@ import type { AdFilterLevel } from "../config.js";
 export const HOSTS_SOURCES: Record<Exclude<AdFilterLevel, "off">, string> = {
   ads: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
   "ads+tracking": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+  // 本部署补回（上游 master 删掉了该档，旧配置里的 ads+porn 会被 zod 静默降级成 ads）
+  "ads+porn": "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn/hosts",
   full: "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews/hosts",
 };
 

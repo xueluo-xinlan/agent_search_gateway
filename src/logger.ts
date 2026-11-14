@@ -7,9 +7,12 @@ const LEVEL_ORDER: Record<Level, number> = { debug: 10, info: 20, warn: 30, erro
 export class Logger {
   private minLevel: number;
   private stream: WriteStream | null = null;
+  /** stdio 传输下必须为 true：stdout 只能承载 JSON-RPC 消息，日志一律走 stderr。 */
+  private useStderr: boolean = false;
 
-  constructor(minLevel: Level, logFile?: string) {
+  constructor(minLevel: Level, logFile?: string, useStderr: boolean = false) {
     this.minLevel = LEVEL_ORDER[minLevel];
+    this.useStderr = useStderr;
     if (logFile) {
       this.stream = createWriteStream(logFile, { flags: "a" });
     }
@@ -21,7 +24,7 @@ export class Logger {
     if (this.stream) {
       this.stream.write(line + "\n");
     } else {
-      if (level === "error" || level === "warn") {
+      if (this.useStderr || level === "error" || level === "warn") {
         console.error(line);
       } else {
         console.log(line);

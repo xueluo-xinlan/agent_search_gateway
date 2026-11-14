@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { z } from "zod";
 
@@ -67,6 +68,9 @@ const configSchema = z.object({
       cache_ttl_ms: z.number().int().positive().default(300000),
       cache_max_entries: z.number().int().positive().default(200),
       max_concurrent: z.number().int().positive().max(16).default(2),
+      // 本部署自定义（上游 master 已移除该能力）：searxng 全部批次失败时的兜底
+      fallback: z.boolean().default(true),
+      tavily_api_key: z.string().default(""),
       engines: enginesSchema.default([]),
       fanout_default: z.number().int().min(1).max(8).default(1),
       quota_enabled: z.boolean().default(true),
@@ -145,6 +149,8 @@ const configSchema = z.object({
       cache_ttl_ms: 300000,
       cache_max_entries: 200,
       max_concurrent: 2,
+      fallback: true,
+      tavily_api_key: "",
       engines: [],
       fanout_default: 1,
       quota_enabled: true,
@@ -196,7 +202,7 @@ const configSchema = z.object({
   ad_filter: z
     .object({
       enabled: z.boolean().default(true),
-      level: z.enum(["off", "ads", "ads+tracking", "full"]).default("ads"),
+      level: z.enum(["off", "ads", "ads+tracking", "ads+porn", "full"]).default("ads"),
       extra_domains: z.array(z.string()).default([]),
       hosts_file: z.string().default("data/adblock/hosts"),
       allowlist: z.array(z.string()).default([]),
@@ -231,6 +237,16 @@ const configSchema = z.object({
       download_ttl_ms: z.number().int().positive().default(604800000),
       download_max_total_bytes: z.number().int().positive().default(4294967296),
       files_route: z.boolean().default(true),
+      // Wayback 兜底：404/410 时查 archive.org 是否有存档。
+      // 死链救援用，不参与正常路径（只在 direct 明确返回 404/410 时触发）。
+      wayback: z
+        .object({
+          enabled: z.boolean().default(true),
+          timeout_ms: z.number().int().positive().default(5000),
+          // 可注入的 API 基址（测试用；生产保持官方端点）
+          api_base: z.string().url().default("https://archive.org/wayback/available"),
+        })
+        .catch({ enabled: true, timeout_ms: 5000, api_base: "https://archive.org/wayback/available" }),
     })
     .catch({
       timeout_ms: 15000,
@@ -247,6 +263,7 @@ const configSchema = z.object({
       download_ttl_ms: 604800000,
       download_max_total_bytes: 4294967296,
       files_route: true,
+      wayback: { enabled: true, timeout_ms: 5000, api_base: "https://archive.org/wayback/available" },
     }),
   // Bilibili 抓取（全部走 fetch，按 URL 类型自动判定；默认关闭）。
   bilibili: z
@@ -408,7 +425,7 @@ const configSchema = z.object({
     }),
 });
 
-export type AdFilterLevel = "off" | "ads" | "ads+tracking" | "full";
+export type AdFilterLevel = "off" | "ads" | "ads+tracking" | "ads+porn" | "full";
 
 /** Bilibili 抓取配置（全部走 fetch，多后端按能力路由）。 */
 export interface BilibiliConfig {
@@ -449,6 +466,10 @@ export interface GatewayConfig {
   flaresolverrTriggerStatus: number[];
   flaresolverrFallbackOnEmpty: boolean;
   searchMaxResults: number;
+  /** 上游全部批次失败时是否启用兜底（Tavily → DuckDuckGo 直连）。本部署自定义。 */
+  searchFallback: boolean;
+  /** Tavily 兜底密钥；空则跳过 Tavily 直接用 DDG。本部署自定义。 */
+  searchTavilyApiKey: string | undefined;
   /**
    * `num_results` 的单一上限：agent 请求超过即按此截断（不报错），
    * 并在结果末尾附加说明。见 search.max_results_cap。
@@ -539,6 +560,13 @@ export interface GatewayConfig {
   fetchDownloadMaxTotalBytes: number;
   /** 是否提供 GET /files/<id>。 */
   fetchFilesRoute: boolean;
+  /** Wayback 兜底开关（404/410 时查存档）。 */
+  fetchWaybackEnabled: boolean;
+  fetchWaybackTimeoutMs: number;
+  /** Wayback 可用性查询端点（测试注入用）。 */
+  fetchWaybackApiBase: string;
+  /** 健康状态文件：记录各后端最后一次成功探测的时间，用于区分 down / unverified。 */
+  healthStatePath: string;
   /** Bilibili 抓取（默认关闭）。 */
   bilibili: BilibiliConfig;
   browserEnabled: boolean;
@@ -574,8 +602,38 @@ export interface GatewayConfig {
   corpusSweepIntervalMs: number;
 }
 
+/** 模块所在目录的上一级（dist/ 的父目录），用于定位随包分发的 gateway.yaml。 */
+export function getProjectRoot(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    return resolve(here, "..");
+  } catch {
+    return process.cwd();
+  }
+}
+
+/**
+ * 配置路径解析（本部署适配，上游 master 只剩 cwd 一种）：
+ *   1. GATEWAY_CONFIG 环境变量
+ *   2. 当前工作目录的 gateway.yaml
+ *   3. 包根目录的 gateway.yaml —— Hermes 把 stdio MCP 起在会话目录，没有这层就起不来
+ *   4. 包根目录的 gateway.yaml.example（最后兜底）
+ */
 export function defaultConfigPath(): string {
-  return resolve(process.cwd(), "gateway.yaml");
+  if (process.env.GATEWAY_CONFIG && existsSync(process.env.GATEWAY_CONFIG)) {
+    return resolve(process.env.GATEWAY_CONFIG);
+  }
+  const cwdPath = resolve(process.cwd(), "gateway.yaml");
+  if (existsSync(cwdPath)) return cwdPath;
+
+  const projectRoot = getProjectRoot();
+  const rootConfig = resolve(projectRoot, "gateway.yaml");
+  if (existsSync(rootConfig)) return rootConfig;
+
+  const rootExample = resolve(projectRoot, "gateway.yaml.example");
+  if (existsSync(rootExample)) return rootExample;
+
+  return cwdPath;
 }
 
 /**
@@ -632,6 +690,9 @@ export function loadConfig(configPath: string = defaultConfigPath()): GatewayCon
     flaresolverrTriggerStatus: v.flaresolverr.trigger_status,
     flaresolverrFallbackOnEmpty: v.flaresolverr.fallback_on_empty,
     searchMaxResults: v.search.max_results,
+    searchFallback: v.search.fallback,
+    searchTavilyApiKey:
+      (v.search.tavily_api_key || process.env.TAVILY_API_KEY || "").trim() || undefined,
     searchMaxResultsCap: v.search.max_results_cap,
     searchMaxResultChars: v.search.max_result_chars,
     searchCacheTtlMs: v.search.cache_ttl_ms,
@@ -692,6 +753,14 @@ export function loadConfig(configPath: string = defaultConfigPath()): GatewayCon
     fetchDownloadTtlMs: v.fetch.download_ttl_ms,
     fetchDownloadMaxTotalBytes: v.fetch.download_max_total_bytes,
     fetchFilesRoute: v.fetch.files_route,
+    fetchWaybackEnabled: v.fetch.wayback.enabled,
+    fetchWaybackTimeoutMs: v.fetch.wayback.timeout_ms,
+    fetchWaybackApiBase: v.fetch.wayback.api_base,
+    // 健康状态落盘位置：区分「从未通过」与「曾经通过后挂了」。
+    // 用项目根下的 data/ 而不是硬编码 /var/lib：Windows 上没有 /var/lib，
+    // 落盘失败会让每次探测都退化成 unverified。可用 env 覆盖（测试用）。
+    healthStatePath:
+      process.env.HERMES_HEALTH_STATE || join(getProjectRoot(), "data", "health-state.json"),
     bilibili: {
       enabled: v.bilibili.enabled,
       routes: {

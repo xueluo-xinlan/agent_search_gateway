@@ -530,6 +530,22 @@ function writeJson(res: import("node:http").ServerResponse, status: number, body
   res.end(JSON.stringify(body));
 }
 
+/**
+ * stdio 传输（本部署适配：上游 master 已移除，Hermes 的本地网关仍以 stdio 启动）。
+ * 语义与 HTTP 传输一致，只是单向复用同一进程的标准输入输出。
+ */
+export async function startStdioServer(
+  deps: { config: GatewayConfig; logger: Logger },
+  createMcpServer: (config: GatewayConfig, logger: Logger) => Promise<McpServer>,
+): Promise<void> {
+  const { config, logger } = deps;
+  const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+  const mcpServer = await createMcpServer(config, logger);
+  const transport = new StdioServerTransport();
+  await mcpServer.connect(transport);
+  logger.info("gateway ready on stdio transport");
+}
+
 export async function startHttpServer(
   deps: {
     config: GatewayConfig;
