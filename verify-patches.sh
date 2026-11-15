@@ -6,7 +6,7 @@
 #
 # 用法：
 #   ./verify-patches.sh            # 检查本目录
-#   ./verify-patches.sh /path/to/asg-root   # 检查指定网关根
+#   ./verify-patches.sh $ASG_WORK   # 检查指定网关根
 #   退出码 0 = 全部存在；1 = 有缺失
 set -uo pipefail
 
@@ -80,6 +80,12 @@ chk "markHealthy 落盘"                  "markHealthy"                         
 
 echo "=== 补丁 12：插件目录用项目根（上游 bug）==="
 chk "loadExtensions(getProjectRoot())"  "loadExtensions(getProjectRoot()"       "$S/server.ts"
+
+echo "=== 补丁 13：cleanResults 放行 file: 协议 ==="
+chk "file: 协议放行"                    'u.protocol !== "file:"'                "$S/search/clean.ts"
+
+echo "=== 补丁 14：additive 源保底（MMR 会吃掉书源）==="
+chk "additive 保底插入"                 "additive 源"                           "$S/search/service.ts"
 
 echo "=== 扩展：additive 叠加机制（让插件能与网页结果并列）==="
 chk "additiveSources"                   "additiveSources"                       "$S/search/service.ts"

@@ -144,7 +144,9 @@ export function cleanResults(results: SearxngResult[], opts: CleanOptions): Clea
     let host: string | null;
     try {
       u = new URL(url);
-      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      // 补丁 13：放行 file: 协议 —— additive 本地书库插件返回 file:// 路径。
+      // 上游 searxng 不会产出该协议，因此对网页结果零影响。
+      if (u.protocol !== "http:" && u.protocol !== "https:" && u.protocol !== "file:") continue;
       host = u.hostname.toLowerCase();
     } catch {
       continue;

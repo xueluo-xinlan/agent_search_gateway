@@ -689,7 +689,7 @@ export function createSearchService(
     //
     // 例外 additive：标了 additive 的源不独占，收集起来在 searxng 结果之上叠加。
     // 给「本地书库/私有索引」这类源用 —— 用户搜普通词时也该看到自己的书，但书源不该顶掉网页检索。
-    const additiveSources: Array<{ runtime: { search: Function }; plan: { hot?: boolean } }> = [];
+    const additiveSources: Array<{ name: string; runtime: { search: Function }; plan: { hot?: boolean } }> = [];
     if (!reverseImage) {
       for (const p of providersForGroup("gateway.search")) {
         const runtime = p.runtime;
@@ -707,7 +707,7 @@ export function createSearchService(
           .filter(Boolean);
         const explicit = wanted.includes(String(p.name).toLowerCase());
         if (additive && !explicit) {
-          additiveSources.push({ runtime, plan });
+          additiveSources.push({ name: String(p.name), runtime, plan });
           continue;
         }
         return searchGatewaySource(p, runtime, effParams, plan, tStart);
@@ -1039,6 +1039,23 @@ export function createSearchService(
           degraded = true;
         }
       }
+      // 补丁 14：additive 源保底。
+      // MMR 多样性重排（mmr_lambda=0.7）会把与网页结果语义相似的本地书源压到 limit 之外：
+      // 实测「奈格里之魂」tgbooks 那条 score 0.90 却排第 7，num_results=6 时直接消失。
+      // 这里给每个 additive 源保留至少 1 条：满了就替换末尾条目，没满就追加。
+      if (additiveSources.length > 0) {
+        const kept = ranked.slice();
+        for (const src of additiveSources) {
+          if (kept.some((r) => resultEngines(r).includes(src.name))) continue;
+          const hit = cleaned.find((r) => resultEngines(r).includes(src.name));
+          if (!hit) continue;
+          if (kept.length < limit) kept.push(hit);
+          else kept[kept.length - 1] = hit;
+          logger.debug(`补丁14：additive 源 ${src.name} 保底插入 1 条`);
+        }
+        ranked = kept;
+      }
+
       const mergeMs = performance.now() - tMerge;
 
       const tRender = performance.now();
