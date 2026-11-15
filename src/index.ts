@@ -1,10 +1,10 @@
-import { loadConfig } from "./config.js";
 import { Logger } from "./logger.js";
 import { closeGatewayRuntime, createServer, startHttpServer, startStdioServer } from "./server.js";
+import { loadSettings } from "./settings/index.js";
 
-function loadConfigOrExit() {
+function loadSettingsOrExit() {
   try {
-    return loadConfig();
+    return loadSettings();
   } catch (err) {
     console.error(`[gateway] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -14,15 +14,20 @@ function loadConfigOrExit() {
 async function main(): Promise<void> {
   // stdio 传输（本部署适配）：Hermes 以 `--stdio` 拉起本网关。
   const isStdio = process.argv.includes("--stdio") || process.env.GATEWAY_TRANSPORT === "stdio";
-  const config = loadConfigOrExit();
+  const { settings, secrets, warnings } = loadSettingsOrExit();
 
   // stdio 下 stdout 必须 100% 留给 JSON-RPC，日志改走 stderr
-  const logger = new Logger(config.logLevel, config.logFile, isStdio);
-  logger.info(`config loaded: mode=${isStdio ? "stdio" : "http"} host=${config.host} port=${config.port} searxng=${config.searxngUrl} flaresolverr=${config.flaresolverrUrl} token=${config.token ? "set" : "none"}`);
+  const logger = new Logger(settings.logging.level, settings.logging.file, isStdio);
+  for (const warning of warnings) logger.warn(warning);
+  logger.info(
+    `config loaded: mode=${isStdio ? "stdio" : "http"} host=${settings.gateway.host} port=${settings.gateway.port} ` +
+      `searxng=${settings.searxng.url} flaresolverr=${settings.flaresolverr.url} ` +
+      `token=${secrets.gateway.token ? "set" : "none"}`,
+  );
 
   try {
     if (isStdio) {
-      await startStdioServer({ config, logger }, createServer);
+      await startStdioServer({ settings, secrets, logger }, createServer);
       const shutdownStdio = async (signal: string) => {
         logger.info(`received ${signal}, shutting down...`);
         try {
@@ -35,11 +40,19 @@ async function main(): Promise<void> {
       };
       process.on("SIGTERM", () => void shutdownStdio("SIGTERM"));
       process.on("SIGINT", () => void shutdownStdio("SIGINT"));
+      process.on("uncaughtException", (err) => {
+        logger.error(`uncaught exception, exiting: ${err.stack ?? String(err)}`);
+        logger.close();
+        process.exit(1);
+      });
+      process.on("unhandledRejection", (reason) => {
+        logger.error(`unhandled rejection: ${String(reason)}`);
+      });
       logger.info("gateway ready in stdio mode (MCP client connected)");
       return;
     }
 
-    const http = await startHttpServer({ config, logger }, createServer);
+    const http = await startHttpServer({ settings, secrets, logger }, createServer);
 
     const shutdown = async (signal: string) => {
       logger.info(`received ${signal}, shutting down...`);

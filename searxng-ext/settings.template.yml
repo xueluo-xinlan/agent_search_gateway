@@ -1,0 +1,156 @@
+# agent_search_gateway —— searxng 配置模板
+#
+# 一键安装器（scripts/install/deps/searxng.mjs）读取本模板，替换 ${VAR}
+# 占位符后生成 data/deps/searxng/settings.yml。密钥只经环境变量注入，不写进仓库。
+#
+#   ${EXA_API_KEY}        —— exaapi 引擎（上游引擎只认 settings.yml）
+#   ${SEARXNG_SECRET_KEY} —— server.secret_key（缺省由安装器随机生成）
+#
+# tavily / zhihu 引擎改读环境变量（TAVILY_API_KEY / ZHIHU_ACCESS_SECRET），
+# 此处留空即可。
+
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "agent-search-gateway"
+
+search:
+  safe_search: 1
+  autocomplete: ""
+  default_lang: "zh-HK"
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 5.0
+  # 不再走代理：API 引擎直连可达，且内置通用爬虫已整体 disabled。
+
+server:
+  port: 8888
+  bind_address: "127.0.0.1"
+  secret_key: "${SEARXNG_SECRET_KEY}"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "POST"
+
+valkey:
+  url: false
+
+ui:
+  default_theme: simple
+
+# plugins 是整体覆盖语义：自定义清单会替换默认清单，故默认插件需一并列出。
+plugins:
+  searx.plugins.calculator.SXNGPlugin:
+    active: true
+  searx.plugins.infinite_scroll.SXNGPlugin:
+    active: false
+  searx.plugins.hash_plugin.SXNGPlugin:
+    active: true
+  searx.plugins.self_info.SXNGPlugin:
+    active: true
+  searx.plugins.unit_converter.SXNGPlugin:
+    active: true
+  searx.plugins.ahmia_filter.SXNGPlugin:
+    active: true
+  searx.plugins.hostnames.SXNGPlugin:
+    active: true
+  searx.plugins.time_zone.SXNGPlugin:
+    active: true
+  searx.plugins.oa_doi_rewrite.SXNGPlugin:
+    active: false
+  searx.plugins.tor_check.SXNGPlugin:
+    active: false
+  searx.plugins.tracker_url_remover.SXNGPlugin:
+    active: true
+  searx.plugins.quota.QuotaPlugin:
+    active: true
+
+engines:
+  # 保留：实测非噪声的垂直源
+  - name: bilibili
+    disabled: false
+    categories: [videos, general]
+  # 9 个通用 keyless 引擎出口 IP 差 → 结果垃圾，整体关闭。
+  - name: google
+    disabled: true
+    inactive: false
+  - name: bing
+    disabled: true
+    base_url: https://cn.bing.com
+  - name: mojeek
+    disabled: true
+  - name: mojeek images
+    disabled: true
+  - name: mojeek news
+    disabled: true
+  - name: marginalia
+    disabled: true
+    inactive: false
+  - name: seznam
+    disabled: true
+  - name: qwant
+    disabled: true
+  - name: yandex
+    disabled: true
+  # 免费 API 引擎
+  - name: exaapi
+    engine: exaapi
+    shortcut: exa
+    api_key: "${EXA_API_KEY}"
+    search_type: instant
+    content_mode: highlights
+    inactive: false
+  - name: tavily
+    engine: tavily
+    shortcut: tvy
+    api_key: ""              # 读环境变量 TAVILY_API_KEY
+    disabled: false
+  - name: youcom
+    engine: youcom
+    shortcut: you
+    disabled: true
+  - name: firecrawl
+    engine: firecrawl
+    shortcut: fc
+    api_key: ""              # 空 = keyless（限速低）；直连即可
+    disabled: false
+  # 知乎官方 API：一个模块两个 scope（站内 / 全网），读 ZHIHU_ACCESS_SECRET
+  - name: zhihu
+    engine: zhihu
+    shortcut: zh
+    scope: zhihu
+    api_key: ""
+    disabled: false
+  - name: zhihu web
+    engine: zhihu
+    shortcut: zhw
+    scope: web
+    api_key: ""
+    disabled: false
+
+  # 知网学术检索：检索匿名可用；摘要/下载需要机构出口 IP（会话票据 LID）。
+  # 容器内无代理，network 用默认即可；若部署在机构出口之外，只会返回标题。
+  - name: cnki
+    engine: cnki
+    shortcut: cnki
+    categories: [science]
+    # 单页条数（CNKI 上限 50）：一次检索即取 50 条候选，实测无验证码、无风控。
+    page_size: 50
+    # 引擎内翻页：默认 1 = 关闭（实测 pageNum>1 返回验证码页、且易触发 403）。
+    num_pages: 1
+    # 不要写 timeout：引擎在 init() 里按 page_size × num_pages 自算总超时并
+    # 汇报给 searxng；手写会盖掉它。
+    disabled: false
+
+  # 以图搜图：searxng 上游自带的 tineye（engine_type=online_url_search，免 key）。
+  # 只服务于请求类别 `search_by_image`（网关侧触发，见 ADR-0010），不在 general 类出现。
+  # 要求 query 里出现图片 URL（http/https）——图片由 TinEye 侧拉取，URL 必须公网可达。
+  - name: tineye
+    engine: tineye
+    categories: [search_by_image]
+    timeout: 15.0
+    disabled: false

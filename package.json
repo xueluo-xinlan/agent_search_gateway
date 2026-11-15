@@ -1,14 +1,17 @@
 {
   "name": "agent_search_gateway",
-  "version": "0.1.0",
-  "description": "统一搜索/抓取网关：MCP server，封装 searxng + FlareSolverr + 内嵌 playwright。基于 djasdh/agent_search_gateway (MIT) 修改，修复两处上游 bug 并新增 Wayback 兜底与健康四态。",
+  "version": "0.3.5",
+  "description": "统一搜索/抓取网关：MCP server，封装 searxng + FlareSolverr + 内嵌 playwright",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xueluo-xinlan/agent_search_gateway.git"
+    "url": "https://github.com/djasdh/agent_search_gateway.git"
   },
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "asg": "bin/asg.mjs"
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
@@ -35,10 +38,5 @@
   },
   "allowScripts": {
     "esbuild@0.28.2": true
-  },
-  "contributors": [
-    {
-      "name": "djasdh"
-    }
-  ]
+  }
 }

@@ -1,5 +1,19 @@
-import type { GatewayConfig } from "./config.js";
+import { join } from "node:path";
+import type { EmbeddingSettings, FlaresolverrSettings, SearxngSettings } from "./settings/index.js";
+import { getProjectRoot } from "./settings/load.js";
+import { GATEWAY_VERSION } from "./version.js";
 import { hasEverBeenHealthy, loadHealthState, markHealthy } from "./health-state.js";
+
+/**
+ * 健康状态落盘位置：区分「从未通过」与「曾经通过后挂了」。
+ * 用项目根下的 data/ 而不是硬编码 /var/lib —— Windows 上没有 /var/lib，
+ * 落盘失败会让每次探测都退化成 unverified。可用 env 覆盖（测试用）。
+ */
+function healthStatePath(): string {
+  // 每次调用时解析而不是模块级常量：测试要用 HERMES_HEALTH_STATE 隔离，
+  // 常量会在 import 时求值，stubEnv 来不及生效。
+  return process.env.HERMES_HEALTH_STATE || join(getProjectRoot(), "data", "health-state.json");
+}
 
 /**
  * 后端探测结果。
@@ -36,20 +50,21 @@ export interface HealthReport {
   corpus?: { namespace: string; entries: number };
 }
 
-async function probe(
-  url: string,
-  backend: string,
-  config: GatewayConfig,
-  timeoutMs = 3000,
-): Promise<BackendProbe> {
-  const statePath = config.healthStatePath;
+/** 健康检查只关心各后端地址与 embedding 开关。 */
+export interface HealthSettings {
+  searxng: SearxngSettings;
+  flaresolverr: FlaresolverrSettings;
+  embedding: EmbeddingSettings;
+}
+
+async function probe(url: string, backend: string, timeoutMs = 3000): Promise<BackendProbe> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const start = Date.now();
 
   const classifyFailure = (message: string): BackendProbe => {
     const latencyMs = Date.now() - start;
-    const state = loadHealthState(statePath);
+    const state = loadHealthState(healthStatePath());
     if (hasEverBeenHealthy(state, backend)) {
       return { status: "down", latencyMs, error: message, lastOkAt: state.lastOkAt[backend] };
     }
@@ -62,42 +77,46 @@ async function probe(
       redirect: "manual",
     });
     const latencyMs = Date.now() - start;
-    if (!res.ok) return classifyFailure(`HTTP ${res.status}`);
-    markHealthy(statePath, backend);
-    return { status: "on", latencyMs, lastOkAt: new Date().toISOString() };
+    if (res.ok) {
+      markHealthy(healthStatePath(), backend);
+      return { status: "on", latencyMs, lastOkAt: new Date().toISOString() };
+    }
+    return classifyFailure(`HTTP ${res.status}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return classifyFailure(message);
+    const cause = (err as { cause?: { code?: unknown } } | null)?.cause;
+    const code = cause && typeof cause === "object" && typeof cause.code === "string" ? cause.code : "";
+    return classifyFailure(code ? `${message} (${code})` : message);
   } finally {
     clearTimeout(timer);
   }
 }
 
 export async function getHealth(
-  config: GatewayConfig,
+  deps: HealthSettings,
   startedAt: number,
   semantic?: SemanticHealth,
 ): Promise<HealthReport> {
   const [searxng, flaresolverr] = await Promise.all([
-    probe(config.searxngUrl, "searxng", config),
+    probe(deps.searxng.url, "searxng"),
     // 未启用的后端不做探测：否则 health 永远显示一个假的失败态，
     // 排查时会把「配置关闭」误读成「服务挂了」。
-    config.flaresolverrEnabled
-      ? probe(config.flaresolverrUrl, "flaresolverr", config)
+    deps.flaresolverr.enabled
+      ? probe(deps.flaresolverr.url, "flaresolverr")
       : Promise.resolve<BackendProbe>({ status: "off", latencyMs: 0 }),
   ]);
   const report: HealthReport = {
     gateway: {
-      version: "0.1.0",
+      version: GATEWAY_VERSION,
       uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
     },
     searxng,
     flaresolverr,
   };
-  if (config.embeddingEnabled) {
-    const state = loadHealthState(config.healthStatePath);
+  if (deps.embedding.enabled) {
+    const state = loadHealthState(healthStatePath());
     const up = Boolean(semantic?.embeddingUp);
-    if (up) markHealthy(config.healthStatePath, "embedding");
+    if (up) markHealthy(healthStatePath(), "embedding");
     report.embedding = {
       status: up ? "on" : hasEverBeenHealthy(state, "embedding") ? "down" : "unverified",
       model: semantic?.model,

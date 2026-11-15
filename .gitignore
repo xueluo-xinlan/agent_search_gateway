@@ -1,24 +1,30 @@
-# 依赖与构建产物
 node_modules/
 dist/
-
-# 配置与密钥（必须自己保留，不入库）
-gateway.yaml
 .env
-*.env
-
-# 运行期数据
-data/
-*.bak-*
 *.log
-.tmp/
-
-# 上游已有
 data/adblock/hosts
+data/corpus/
+data/downloads/
+data/bilibili.sqlite*
+data/weibo-chrome-profile/
+data/opencli-extension/
+data/opencli-extension-*.zip
+data/chrome.log
+# 运行时数据整体不入库（语料/缓存/下载/浏览器 profile/后端安装等）
+data/
+# 实例配置（含环境相关项，不入库；模板见 gateway.yaml.example）
+gateway.yaml
+# 密钥（不入库；模板见 secrets.yaml.example）
+secrets.yaml
+.tmp/
+# callgraph 生成产物/调试工具
 docs/callgraph.mmd
 scripts/callgraph-data.json
 scripts/gen-callgraph.mjs
-
-# Python 字节码（可能内嵌绝对路径）
+# Python 缓存（searxng-ext 的本地编译/测试产物）
 __pycache__/
 *.pyc
+# 评测/基准产物(工作文件,不入库;harness 本身保留)
+eval/report*.md
+eval/report*.json
+eval/matrix/

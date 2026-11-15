@@ -25,6 +25,9 @@ searx/engines/
   cnki.py        知网学术检索(KNS 站内接口,零凭据;默认绕开代理)
 searx/plugins/
   quota.py       配额台账插件(pre_search 计数 + 剔除耗尽引擎)
+settings.example.yml  手动安装参考配置(引擎/插件清单)
+settings.template.yml 一键安装器渲染 settings.yml 用的模板
+quota.config.json     配额种子配置(各引擎额度上限)
 ```
 
 > `exaapi` 是 **searxng 上游自带**(零代码),不在本目录;只需在 settings.yml 配置。

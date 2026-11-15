@@ -4,7 +4,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { GatewayConfig } from "../src/config.js";
 import type { DomainFilter } from "../src/filter/domain-filter.js";
 import type { Logger } from "../src/logger.js";
 import {
@@ -20,7 +19,10 @@ import {
   createSearchService,
   isImageQuery,
   isReverseImageQuery,
+  type SearchSettingsDeps,
 } from "../src/search/service.js";
+import type { Secrets, Settings } from "../src/settings/index.js";
+import { deepMerge, makeSecrets, makeSettings, searchServiceDeps, type DeepPartial } from "./helpers/settings.js";
 
 const silentLogger: Logger = {
   debug: () => {},
@@ -277,8 +279,6 @@ let searxCategories: string[] = [];
 let searxEngines: Array<string | null> = [];
 let searxQueries: string[] = [];
 let searxFail = false;
-/** searxng /config 返回的已启用引擎名；默认带 tineye（图片引擎） */
-let searxEngineNames: string[] = ["tineye", "exaapi"];
 let searxResults: Array<Record<string, unknown>> = [];
 
 // mock 图床（uguu/pomf 协议）；记录收到的 multipart 原文以便断言
@@ -300,64 +300,61 @@ let baiduPort = 0;
 let baiduMode: "ok" | "reject" = "ok";
 let baiduUploads = 0;
 
-function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
-  return {
-    host: "127.0.0.1",
-    port: 0,
-    token: undefined,
-    logLevel: "info",
-    logFile: undefined,
-    searxngUrl: `http://127.0.0.1:${searxPort}`,
-    searxngTimeoutMs: 5000,
-    searchMaxResults: 10,
-    searchMaxResultsCap: 50,
-    searchMaxResultChars: 500,
-    searchCacheTtlMs: 0,
-    searchCacheMaxEntries: 0,
-    searchMaxConcurrent: 2,
-    searchEngines: ["exaapi"],
-    searchEnginesResident: [],
-    searchFanoutDefault: 1,
-    searchQuotaEnabled: false,
-    searchQuotaLedgerPath: "",
-    searchQuotaTightThreshold: 0.1,
-    searchResidentQuotaFloor: 0.2,
-    searchCategoryTimeoutMs: {},
-    searchReverseImageEnabled: true,
-    searchReverseImageCategory: "search_by_image",
-    searchReverseImageSources: ["tracemoe"],
-    searchTraceMoeUrl: `http://127.0.0.1:${tracePort}`,
-    searchTraceMoeTimeoutMs: 3000,
-    searchTraceMoeMaxResults: 8,
-    searchReverseImageLocalMaxBytes: 5 * 1024 * 1024,
-    searchReverseImagePublishEnabled: true,
-    searchReverseImagePublishEndpoint: `http://127.0.0.1:${publishPort}/upload?output=json`,
-    searchReverseImagePublishTimeoutMs: 3000,
-    searchSaucenaoApiKey: "test-key",
-    searchSaucenaoUrl: `http://127.0.0.1:${saucenaoPort}`,
-    searchSaucenaoTimeoutMs: 3000,
-    searchSaucenaoMaxResults: 8,
-    searchSaucenaoMinsim: 0,
-    searchBaiduReverseEnabled: true,
-    searchBaiduReverseUrl: `http://127.0.0.1:${baiduPort}`,
-    searchBaiduReverseTimeoutMs: 3000,
-    searchBaiduReverseMaxResults: 8,
-    rerankEnabled: true,
-    rerankEngineBoost: {},
-    rerankDiversityEnabled: false,
-    rerankDiversityMmrLambda: 1,
-    rerankDiversityMaxPerDomain: 3,
-    rerankAuthorityEnabled: false,
-    rerankAuthorityWeight: 0.5,
-    adFilterEnabled: false,
-    adFilterLevel: "off",
-    adFilterExtraDomains: [],
-    adFilterHostsFile: "data/adblock/hosts",
-    adFilterAllowlist: [],
-    adFilterAutoUpdate: false,
-    adFilterAutoUpdateIntervalMs: 86400000,
-    ...overrides,
-  } as GatewayConfig;
+function makeConfig(
+  overrides: DeepPartial<Settings> = {},
+  secretOverrides: DeepPartial<Secrets> = {},
+): SearchSettingsDeps {
+  const base: DeepPartial<Settings> = {
+    searxng: { url: `http://127.0.0.1:${searxPort}`, timeout_ms: 5000 },
+    search: {
+      cache_ttl_ms: 0,
+      cache_max_entries: 0,
+      max_concurrent: 2,
+      engines: { rotating: ["exaapi"], resident: [] },
+      fanout_default: 1,
+      quota_enabled: false,
+      quota_ledger_path: "",
+      quota_tight_threshold: 0.1,
+      resident_quota_floor: 0.2,
+      category_timeout_ms: {},
+      reverse_image: {
+        enabled: true,
+        category: "search_by_image",
+        sources: ["tracemoe"],
+        tracemoe_url: `http://127.0.0.1:${tracePort}`,
+        tracemoe_timeout_ms: 3000,
+        tracemoe_max_results: 8,
+        local_max_bytes: 5 * 1024 * 1024,
+        publish: {
+          enabled: true,
+          endpoint: `http://127.0.0.1:${publishPort}/upload?output=json`,
+          timeout_ms: 3000,
+        },
+        saucenao: {
+          url: `http://127.0.0.1:${saucenaoPort}`,
+          timeout_ms: 3000,
+          max_results: 8,
+          minsim: 0,
+        },
+        baidu: {
+          enabled: true,
+          url: `http://127.0.0.1:${baiduPort}`,
+          timeout_ms: 3000,
+          max_results: 8,
+        },
+      },
+    },
+    rerank: {
+      enabled: true,
+      engine_boost: {},
+      diversity: { enabled: false, mmr_lambda: 1, max_per_domain: 3 },
+      authority: { enabled: false, weight: 0.5 },
+    },
+  };
+  const secrets = makeSecrets(
+    deepMerge({ search: { reverse_image: { saucenao: { api_key: "test-key" } } } }, secretOverrides),
+  );
+  return searchServiceDeps(makeSettings(deepMerge(base, overrides)), secrets);
 }
 
 beforeAll(async () => {
@@ -365,9 +362,14 @@ beforeAll(async () => {
     const url = new URL(req.url ?? "/", "http://localhost");
     res.setHeader("Content-Type", "application/json");
     if (url.pathname === "/config") {
-      // 默认带 tineye：反向图搜的设计意图就是「有图片引擎才转发给 searxng」。
-      // 个别用例会临时清空它，验证「无图片引擎时跳过 searxng」。
-      res.end(JSON.stringify({ engines: searxEngineNames.map((n) => ({ name: n, enabled: true })) }));
+      // 默认带 tineye：反向图搜的设计意图是「有图片引擎才转发给 searxng」。
+      // 本部署补丁会让「无图片引擎」时完全跳过 searxng，所以这里必须给 tineye，
+      // 否则原有用例断言不到 forwarded query。
+      res.end(
+        JSON.stringify({
+          engines: [{ name: "tineye", enabled: true }, { name: "exaapi", enabled: true }],
+        }),
+      );
       return;
     }
     searxQueries.push(url.searchParams.get("q") ?? "");
@@ -548,7 +550,8 @@ describe("createSearchService 反向图搜扇出（ADR-0010）", () => {
     searxFail = true;
     searxCategories = [];
     searxResults = [];
-    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    // 关兜底：否则 Bing/DDG 会真的联网，把「部分成功」断言换成网页结果
+    const svc = createSearchService(makeConfig({ search: { fallback: false } }), domainFilter, silentLogger);
     const r = await svc.search({ query: IMG, categories: "search_by_image" });
     expect(r.ok).toBe(true);
     expect(r.text).toContain("某番 · 第 2 集");
@@ -560,7 +563,8 @@ describe("createSearchService 反向图搜扇出（ADR-0010）", () => {
     searxFail = true;
     searxCategories = [];
     searxResults = [];
-    const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
+    // 同上：关兜底，测的是「全失败」这条路径
+    const svc = createSearchService(makeConfig({ search: { fallback: false } }), domainFilter, silentLogger);
     const r = await svc.search({ query: IMG, categories: "search_by_image" });
     expect(r.ok).toBe(false);
     expect(r.text).toContain("搜索失败");
@@ -573,30 +577,11 @@ describe("createSearchService 反向图搜扇出（ADR-0010）", () => {
     searxCategories = [];
     searxResults = [];
     lastTraceQuery = undefined;
-    const svc = createSearchService(makeConfig({ searchReverseImageEnabled: false }), domainFilter, silentLogger);
+    const svc = createSearchService(makeConfig({ search: { reverse_image: { enabled: false } } }), domainFilter, silentLogger);
     const r = await svc.search({ query: IMG, categories: "search_by_image" });
     expect(r.ok).toBe(true);
     expect(lastTraceQuery).toBeUndefined();
     expect(r.text).not.toContain("反向图搜");
-  });
-
-  it("searxng 无图片引擎（tineye 未启用）→ 跳过 searxng，只走网关侧图源", async () => {
-    // 本机 SearXNG 只启用了文本引擎时，把图片 URL 发给它会被当成关键词搜索，
-    // 返回一堆无关页面污染结果集。此时应完全不请求 searxng。
-    searxEngineNames = ["exaapi"];
-    try {
-      traceMode = "ok";
-      searxFail = false;
-      searxQueries = [];
-      searxCategories = [];
-      const svc = createSearchService(makeConfig(), domainFilter, silentLogger);
-      const r = await svc.search({ query: IMG, categories: "search_by_image" });
-      expect(r.ok).toBe(true);
-      expect(searxQueries.length).toBe(0); // 一次都没打到 searxng
-      expect(r.text).toContain("tracemoe"); // 网关侧图源照常参与
-    } finally {
-      searxEngineNames = ["tineye", "exaapi"];
-    }
   });
 });
 
@@ -682,7 +667,7 @@ describe("createSearchService 本地图片（image_path）", () => {
 
   it("publish 关闭 → 只走 trace.moe，并说明 tineye 未参与", async () => {
     reset("ok");
-    const svc = createSearchService(makeConfig({ searchReverseImagePublishEnabled: false }), domainFilter, silentLogger);
+    const svc = createSearchService(makeConfig({ search: { reverse_image: { publish: { enabled: false } } } }), domainFilter, silentLogger);
     const r = await svc.search({ query: "", imagePath: imgPath, categories: "search_by_image" });
     expect(r.ok).toBe(true);
     expect(publishCalls).toBe(0);
@@ -743,7 +728,7 @@ describe("createSearchService 本地图片（image_path）", () => {
 
   it("本地图请求不进搜索缓存（同一路径改了文件也不会命中旧结果）", async () => {
     reset("ok");
-    const svc = createSearchService(makeConfig({ searchCacheTtlMs: 60000 }), domainFilter, silentLogger);
+    const svc = createSearchService(makeConfig({ search: { cache_ttl_ms: 60000 } }), domainFilter, silentLogger);
     const a = await svc.search({ query: "", imagePath: imgPath, categories: "search_by_image" });
     const b = await svc.search({ query: "", imagePath: imgPath, categories: "search_by_image" });
     expect(a.cacheHit).toBe(false);
@@ -790,7 +775,7 @@ describe("createSearchService 多源扇出（ADR-0012）", () => {
   it("三源并发：URL 输入 → 各源候选合并进结果", async () => {
     resetAll();
     const q = imgUrl();
-    const svc = createSearchService(makeConfig({ searchReverseImageSources: all }), domainFilter, silentLogger);
+    const svc = createSearchService(makeConfig({ search: { reverse_image: { sources: all } } }), domainFilter, silentLogger);
     const r = await svc.search({ query: q, categories: "search_by_image" });
     expect(r.ok).toBe(true);
     expect(searxQueries).toEqual([q]); // searxng（tineye）用 query 里的图片 URL
@@ -805,7 +790,10 @@ describe("createSearchService 多源扇出（ADR-0012）", () => {
   it("SauceNAO 未配 api_key → 跳过该源（不发请求）", async () => {
     resetAll();
     const svc = createSearchService(
-      makeConfig({ searchReverseImageSources: all, searchSaucenaoApiKey: "" }),
+      makeConfig(
+      { search: { reverse_image: { sources: all } } },
+      { search: { reverse_image: { saucenao: { api_key: "" } } } },
+    ),
       domainFilter,
       silentLogger,
     );
@@ -818,7 +806,7 @@ describe("createSearchService 多源扇出（ADR-0012）", () => {
   it("百度识图被拒 → 其它源结果照常 + 提示 baidu 不可用", async () => {
     resetAll();
     baiduMode = "reject";
-    const svc = createSearchService(makeConfig({ searchReverseImageSources: all }), domainFilter, silentLogger);
+    const svc = createSearchService(makeConfig({ search: { reverse_image: { sources: all } } }), domainFilter, silentLogger);
     const r = await svc.search({ query: imgUrl(), categories: "search_by_image" });
     expect(r.ok).toBe(true);
     expect(r.text).toContain("某番");
@@ -829,7 +817,7 @@ describe("createSearchService 多源扇出（ADR-0012）", () => {
   it("SauceNAO 匿名拒绝（status<0）→ 提示 + 其它源照常", async () => {
     resetAll();
     saucenaoMode = "apierror";
-    const svc = createSearchService(makeConfig({ searchReverseImageSources: all }), domainFilter, silentLogger);
+    const svc = createSearchService(makeConfig({ search: { reverse_image: { sources: all } } }), domainFilter, silentLogger);
     const r = await svc.search({ query: imgUrl(), categories: "search_by_image" });
     expect(r.ok).toBe(true);
     expect(r.text).toContain("图源 saucenao 不可用");
@@ -839,7 +827,7 @@ describe("createSearchService 多源扇出（ADR-0012）", () => {
 
   it("本地图：三源直传（不经图床）+ searxng 用发布后的公网 URL", async () => {
     resetAll();
-    const svc = createSearchService(makeConfig({ searchReverseImageSources: all }), domainFilter, silentLogger);
+    const svc = createSearchService(makeConfig({ search: { reverse_image: { sources: all } } }), domainFilter, silentLogger);
     const r = await svc.search({ query: "", imagePath: imgPath, categories: "search_by_image" });
     expect(r.ok).toBe(true);
     expect(saucenaoQueries).toEqual([""]); // 本地直传 → 没有 url 参数

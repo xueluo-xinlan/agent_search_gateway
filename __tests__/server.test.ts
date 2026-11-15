@@ -3,10 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GatewayConfig } from "../src/config.js";
 import type { Logger } from "../src/logger.js";
 import { getFetchStore, startHttpServer } from "../src/server.js";
 import { createServer } from "../src/server.js";
+import type { Settings } from "../src/settings/index.js";
+import { deepMerge, makeSecrets, makeSettings, type DeepPartial } from "./helpers/settings.js";
 
 /** 产物落盘目录：测试统一用临时目录，避免污染仓库 data/。 */
 const DOWNLOAD_DIR = mkdtempSync(join(tmpdir(), "gw-files-"));
@@ -23,41 +24,23 @@ const silentLogger: Logger = {
   close: () => {},
 } as Logger;
 
-function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
-  return {
-    host: "127.0.0.1",
-    port: 0,
-    token: undefined,
-    logLevel: "info",
-    logFile: undefined,
-    searxngUrl: "http://127.0.0.1:1",
-    searxngTimeoutMs: 3000,
-    flaresolverrUrl: "http://127.0.0.1:1",
-    flaresolverrEnabled: true,
-    flaresolverrTimeoutMs: 5000,
-    flaresolverrMaxConcurrent: 2,
-    flaresolverrTriggerStatus: [403, 405, 429],
-    flaresolverrFallbackOnEmpty: true,
-    searchMaxResults: 10,
-    searchMaxResultsCap: 50,
-    searchMaxResultChars: 500,
-    searchCacheTtlMs: 300000,
-    searchCacheMaxEntries: 200,
-    searchMaxConcurrent: 2,
-    adFilterEnabled: false,
-    adFilterLevel: "off",
-    adFilterExtraDomains: [],
-    adFilterHostsFile: "data/adblock/hosts",
-    adFilterAllowlist: [],
-    adFilterAutoUpdate: false,
-    adFilterAutoUpdateIntervalMs: 86400000,
-    fetchMaxDownloadBytes: 1073741824,
-    fetchDownloadDir: DOWNLOAD_DIR,
-    fetchDownloadTtlMs: 604800000,
-    fetchDownloadMaxTotalBytes: 4294967296,
-    fetchFilesRoute: true,
-    ...overrides,
+function makeConfig(overrides: DeepPartial<Settings> = {}): Settings {
+  const base: DeepPartial<Settings> = {
+    gateway: { port: 0 },
+    // 测试不依赖本机 searxng：显式指向不可达端口，保证「搜索失败」分支稳定。
+    searxng: { url: "http://127.0.0.1:1" },
+    // 关兜底：本部署的兜底会真的去 Bing/DDG 联网，一旦联网成功，
+    // 「searxng 不可达 → 搜索失败」这条断言就变成成功结果，测试失去意义。
+    search: { fallback: false },
+    fetch: {
+      download_dir: DOWNLOAD_DIR,
+      download_ttl_ms: 604800000,
+      download_max_total_bytes: 4294967296,
+      files_route: true,
+    },
+    ad_filter: { enabled: false, level: "off" },
   };
+  return makeSettings(deepMerge(base, overrides));
 }
 
 async function mcpRequest(base: string, body: unknown, opts: { token?: string; sessionId?: string } = {}) {
@@ -74,7 +57,7 @@ describe("MCP HTTP server", () => {
 
   beforeAll(async () => {
     const cfg = makeConfig();
-    const http = await startHttpServer({ config: cfg, logger: silentLogger }, createServer);
+    const http = await startHttpServer({ settings: cfg, secrets: makeSecrets(), logger: silentLogger }, createServer);
     closeFn = http.close;
     const url = new URL(http.url);
     base = `http://127.0.0.1:${url.port}`;
@@ -183,8 +166,9 @@ describe("token 认证", () => {
   let closeFn: (() => Promise<void>) | undefined;
 
   beforeAll(async () => {
-    const cfg = makeConfig({ token: "secret-token" });
-    const http = await startHttpServer({ config: cfg, logger: silentLogger }, createServer);
+    const cfg = makeConfig();
+    const secrets = makeSecrets({ gateway: { token: "secret-token" } });
+    const http = await startHttpServer({ settings: cfg, secrets, logger: silentLogger }, createServer);
     closeFn = http.close;
     const url = new URL(http.url);
     base = `http://127.0.0.1:${url.port}`;
@@ -254,7 +238,8 @@ describe("session 空闲清扫", () => {
   beforeAll(async () => {
     const http = await startHttpServer(
       {
-        config: makeConfig(),
+        settings: makeConfig(),
+        secrets: makeSecrets(),
         logger: silentLogger,
         sessionIdleTtlMs: TTL_MS,
         sessionSweepIntervalMs: SWEEP_MS,

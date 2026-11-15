@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { AdFilterLevel } from "../config.js";
+import type { AdFilterLevel } from "../settings/index.js";
 
 /**
  * StevenBlack hosts 各 level 对应的源 URL。
@@ -11,7 +11,7 @@ import type { AdFilterLevel } from "../config.js";
 export const HOSTS_SOURCES: Record<Exclude<AdFilterLevel, "off">, string> = {
   ads: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
   "ads+tracking": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-  // 本部署补回（上游 master 删掉了该档，旧配置里的 ads+porn 会被 zod 静默降级成 ads）
+  // 本部署补回：上游删掉了该档，旧配置里的 ads+porn 会被 zod 静默降级成 ads（防护面少一半）。
   "ads+porn": "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn/hosts",
   full: "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews/hosts",
 };

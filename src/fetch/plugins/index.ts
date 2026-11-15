@@ -1,31 +1,36 @@
 /**
- * 取件插件注册表。
+ * 取件插件注册表默认实例。
  *
  * `directFetch` 入口先查此表：命中即交给插件（跳过 SSRF 与 generic 重定向链），
- * 未命中才走通用抓取。新增插件时只在这里注册，核心路径不改。
- * 当前注册：`cnki`（知网取件，见 ADR-0009）、`bilibili`（B 站视频/专栏自动摘要）。
+ * 未命中才走通用抓取。核心不再内置平台实现；bilibili / weibo / cnki 等由
+ * `data/extensions` 下的外部插件提供，启动时注入合并后的注册表。
  */
-import { bilibiliPlugin } from "../../bilibili/index.js";
-import { cnkiPlugin } from "./cnki.js";
-import type { FetchPlugin } from "./types.js";
+import { createFetchPluginRegistry, type FetchPluginRegistry } from "./registry.js";
+import type { FetchPlugin, FetchPluginContext } from "./types.js";
 
-export type { FetchPlugin, FetchPluginContext, FetchPluginResult } from "./types.js";
+export type {
+  FetchPlugin,
+  FetchPluginContext,
+  FetchPluginRequirement,
+  FetchPluginResult,
+} from "./types.js";
 
-const plugins: FetchPlugin[] = [cnkiPlugin, bilibiliPlugin];
+/** 内置抓取插件：核心不再内置平台实现，保留空数组供测试/兼容使用。 */
+export const builtinPlugins: readonly FetchPlugin[] = [];
 
-/** 返回接管该 URL 的插件（按注册顺序取第一个命中者）。 */
-export function findPlugin(url: URL): FetchPlugin | undefined {
-  for (const p of plugins) {
-    try {
-      if (p.match(url)) return p;
-    } catch {
-      /* 插件 match 抛错视为不接管，不影响通用路径 */
-    }
-  }
-  return undefined;
+export const fetchPluginRegistry = createFetchPluginRegistry(builtinPlugins);
+
+/** 合并外部插件并做重复 id 校验。 */
+export function createFetchRegistry(external: readonly FetchPlugin[]): FetchPluginRegistry {
+  return createFetchPluginRegistry(external);
 }
 
-/** 已注册插件名（供 health / 日志使用）。 */
+/** 返回接管该 URL 的插件（已统一过滤 `enabled`，按注册顺序取第一个命中者）。 */
+export function findPlugin(url: URL, ctx: FetchPluginContext): FetchPlugin | undefined {
+  return fetchPluginRegistry.find(url, ctx);
+}
+
+/** 已注册插件的规范 ID（供 health / 日志使用）。 */
 export function registeredPlugins(): string[] {
-  return plugins.map((p) => p.name);
+  return fetchPluginRegistry.list().map((plugin) => plugin.id);
 }

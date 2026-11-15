@@ -147,8 +147,6 @@ export function createCorpusStore(opts: CorpusStoreOptions, logger?: Logger): Co
       const rows = knnStmt.all(toVectorJson(query), k) as Array<{ url: string; distance: number }>;
       if (rows.length === 0) return [];
       const urls = rows.map((r) => r.url);
-      // 必须校验 expires_at：gc 是周期性跑的，在它跑之前过期条目仍躺在向量表里，
-      // 不在这里过滤就会把「一个月前抓的旧内容」当成新鲜召回（2026-11-03 修）。
       const metaRows = db
         .prepare(
           `SELECT url, title, content, fetched_at FROM corpus_meta

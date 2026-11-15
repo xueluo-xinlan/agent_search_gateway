@@ -10,4 +10,4 @@
 - **所有** `categories=science` 请求的 searxng 超时上限放宽到 25s（原 10s），以容纳 CNKI 摘要抓取；代价是该类别的失败判定阈值一并放宽。
 - 未对 CNKI 结果加权（`rerank.engine_boost` 不加 `cnki`），依赖既有重排层自然排序；如需可后续调整。
 - 默认搜索行为不变：不指定类别时仍走常驻源 ∪ 轮换源（ADR-0008）。
-- 部署侧需同步：searxng 实例的 `settings.yml` 中 cnki 的 `categories` 改为 `[science]`，并按需重建 / 重启 searxng 与 gateway。仓库内模板（`searxng-ext/settings.example.yml`、`docker/searxng/settings.template.yml`）与示例（`gateway.yaml.example`、`docker/gateway.docker.yaml`）已一并更新。
+- 部署侧需同步：searxng 实例的 `settings.yml` 中 cnki 的 `categories` 改为 `[science]`，并按需重建 / 重启 searxng 与 gateway。仓库内模板（`searxng-ext/settings.example.yml`、`searxng-ext/settings.template.yml`）与示例（`gateway.yaml.example`）已一并更新。

@@ -1,40 +1,24 @@
-# agent_search_gateway（增强版）
+# agent_search_gateway
 
-> **本项目基于 [djasdh/agent_search_gateway](https://github.com/djasdh/agent_search_gateway)（MIT）修改。**
-> 原项目版权归 djasdh 所有；本仓库的修改部分同样以 MIT 发布，完整改动见 [PATCHES.md](PATCHES.md)。
+统一搜索/抓取网关：一个 **MCP server（HTTP transport）**，把搜索、网页抓取、浏览器交互封装成稳定的 agent 工具。
 
-统一搜索/抓取网关：一个 **MCP server**，把搜索、网页抓取、浏览器交互封装成稳定的 agent 工具。
+面向 3.8GB 小服务器，全自托管，轻量。
 
-面向 3–4 GB 小服务器，全自托管，轻量。
+---
 
-## 相比上游的改动
-
-### Bug 修复（两处均为上游真实缺陷）
-
-| 问题 | 症状 | 修法 |
-|---|---|---|
-| **空壳判定顺序错误** | `isShellJs` 把「HTML 长度 > 2000」放在最前，导致 2 KB 以上的 Cloudflare 验证页被判为非壳、不升级渲染，**最终把验证页当正文返回** | 挑战特征优先判定；长度门限只约束「小页面 + 外链脚本」这一类 |
-| **反向图搜污染结果集** | `categories=search_by_image` 时仍向 SearXNG 发请求；若 SearXNG 没有 `tineye`，会退化成普通关键词搜索，把**图片 URL 当搜索词**，返回一堆无关文本结果 | 反向图搜时若 SearXNG 无图片引擎，跳过它，只走网关侧图源 |
-
-### 新增能力
-
-| 能力 | 说明 |
-|---|---|
-| **Wayback 兜底** | `direct` 返回 404/410 时查 archive.org 存档，命中则返回存档正文并标注来源（403/429 不触发——那是反爬不是删除） |
-| **健康四态** | `on` / `down` / `unverified` / `off`。区分「曾经成功过后来挂了」与「从来没成功过」，后者通常意味着配置写错 |
-| **METRICS 落盘** | 每次检索写 JSONL（query / 条数 / 耗时 / 引擎分布 / 降级标记） |
-
-### 部署适配
-
-| 改动 | 原因 |
-|---|---|
-| stdio 传输 + 日志走 stderr | MCP client 以 `--stdio` 拉起时，stdout 只能承载 JSON-RPC |
-| 配置路径四级回退 | 从任意 cwd 启动都能找到 `gateway.yaml` |
-| Tavily → DDG 兜底 | 上游已移除该能力，本部署依赖 |
-| `ads+porn` 过滤档 | 曾因 zod 静默降级为 `ads`，防护面少一半 |
-| corpus TTL 校验 | 字段存在但代码不校验，过期条目仍会被召回 |
-
-Windows 第二通道（住宅 IP）的部署脚本与三个专属坑见 [`deploy/pc/README.md`](deploy/pc/README.md)。
+> **本仓库是分叉版本**，基线 `djasdh/agent_search_gateway` **v0.3.5**。
+>
+> 除上游能力外，额外维护 **12 处本地补丁**，其中 3 处是对上游 bug 的修复：
+> `stdio` 传输（上游 0.3.x 已移除，而 MCP 客户端以 `--stdio` 拉起）、
+> `isShellJs` 反爬判定（上游把 2KB 以上的验证页当正文返回）、
+> 反图搜跳过无图片引擎（上游把图片 URL 当关键词搜，污染结果集）。
+>
+> 另含：健康四态、Wayback 兜底、`ads+porn` 过滤档、corpus 过期校验、
+> METRICS 落盘、配置查找四级回退、兜底检索（Tavily → Bing → DuckDuckGo）、
+> 插件目录按项目根解析、`additive` 可叠加搜索源机制。
+>
+> **完整清单与每项的「为什么上游不能直接用」见 [PATCHES.md](PATCHES.md)**。
+> 升级上游前务必先读它 —— 里面有升级流程、7 个已知坑与回滚命令。
 
 ## 架构
 
@@ -43,13 +27,13 @@ Agent（hermes / OpenCode / my-agent-core / 其它 MCP client）
   │  MCP over HTTP
   ▼
 gateway (本服务, :3000/mcp)
-  ├─ search → searxng (:8890) → 清洗/广告过滤/语义召回/重排 → 纯 md
+  ├─ search → searxng (:8888) → 清洗/广告过滤/缓存 → 纯 md
   ├─ fetch  → 按 Content-Type 分派：
   │     网页 HTML→md；文本类直出/轻转换（JSON/CSV/XML）
   │     PDF → 抽正文（unpdf）
   │     图片等二进制 → 落盘 data/downloads + /files/<id> 链接
-  │     网页自动路由 direct → (404/410) Wayback 存档 → FlareSolverr (:8191) → playwright
-  │     fetch 缓存按渲染方式隔离：direct / flaresolverr / playwright / wayback
+  │     网页自动路由 direct → FlareSolverr (:8192) → playwright
+  │     fetch 缓存按渲染方式隔离
   ├─ browser_* → 内嵌 playwright（agent 交互：navigate/click/type/scroll/find/screenshot）
   └─ health → 各后端连通状态
 ```
@@ -71,7 +55,7 @@ gateway (本服务, :3000/mcp)
 | `browser_click` / `browser_type` | 点击/输入，返回无障碍树 |
 | `browser_scroll` / `browser_find` | 滚动 / 搜索页面文本 |
 | `browser_close` | 关闭浏览器释放资源 |
-| `health` | 各后端连通状态，四态：`on`（本次成功）/ `down`（曾成功过、现失败）/ `unverified`（从未成功过，多半是配置错）/ `off`（未启用）。响应含 `lastOkAt`，`unverified` 时该字段缺失 |
+| `health` | 各后端连通状态 |
 
 ## 错误码
 
@@ -100,6 +84,8 @@ gateway (本服务, :3000/mcp)
 
 ## B 站抓取
 
+> 需先安装官方插件：`asg extensions install djasdh/agent-search-gateway-plugin-bilibili@0.1.0`。
+
 全部走 `fetch`，不新增工具；B 站视频/专栏 URL 会被插件自动接管，不需要额外参数。默认关闭，在 `gateway.yaml` 里把 `bilibili.enabled` 设为 `true`。
 
 | 请求 | 说明 |
@@ -116,7 +102,7 @@ gateway (本服务, :3000/mcp)
 
 - `cli-kukemc`（`bili` CLI）：详情、评论
 - `cli-ytdlp`（`yt-dlp`）：详情、音频直链
-- `http`：全部能力；`http.command` 非空时由插件拉起/回收，否则连 `base_url`
+- `http`：全部能力；`http.command` 非空时由插件拉起/回收，否则连 `base_url`。服务端已拆到独立仓库 [djasdh/bilibili-article-server](https://github.com/djasdh/bilibili-article-server)，可用 `asg plugins install article` 安装。
 
 要点：
 
@@ -126,16 +112,210 @@ gateway (本服务, :3000/mcp)
 - 评论按页抓取直到结束或 60 秒预算；没拉完返回 `complete: false`，再次 fetch 同一 URL 续传，不提供翻页参数。
 - 未安装后端或 `bilibili.enabled=false` 时，B 站 URL 会明确返回 `BILI_UNAVAILABLE`，不会静默回退成抓网页。
 
-## 快速开始
+## 微博抓取
+
+> 需先安装官方插件：`asg extensions install djasdh/agent-search-gateway-plugin-weibo@0.1.0`。
+
+全部走 `fetch`，不新增工具；默认关闭。普通微博页面 URL 带 `?weibo=` 才接管；`sinaimg.cn` 图片 URL 自动接管为附件。
+
+### 前置
+
+1. Node ≥ 20.18.1，安装 OpenCLI（基线版本 `2.0.2`）：
+
+```bash
+npm install -g @jackwener/opencli
+```
+
+2. 浏览器登录 `weibo.com`。**推荐 CDP 模式**（Chrome 137+ 已移除 `--load-extension`）：
+
+```bash
+google-chrome-stable \
+  --user-data-dir="$PWD/data/weibo-chrome-profile" \
+  --remote-debugging-port=9222 \
+  --remote-allow-origins='*' \
+  --no-first-run \
+  "https://weibo.com/login"
+# 扫码登录后，在网关进程环境里设置：
+export OPENCLI_CDP_ENDPOINT=http://127.0.0.1:9222
+```
+
+旧版 Chrome 也可以改用 Browser Bridge 扩展（`opencli doctor` 显示扩展已连接即可）。
+
+3. 安装 post adapter override（给 `weibo post` 补图片外链字段）：
+
+```bash
+./scripts/install-weibo-override.sh
+```
+
+4. `gateway.yaml` 里把 `weibo.enabled` 设为 `true`。
+
+### 请求
+
+| 请求 | 说明 |
+|---|---|
+| `https://weibo.com/{uid}/{mblogid}?weibo=post` | 正文/转发 + 图片外链（默认动作） |
+| `https://m.weibo.cn/detail/{id}?weibo=comments&limit=20` | 评论（最多 50） |
+| `https://weibo.com/u/{uid}?weibo=user` | 用户信息 |
+| `https://weibo.com/u/{uid}?weibo=user-posts&days=30` | 博主最近 30 天微博（Markdown） |
+| `https://weibo.com/u/{uid}?weibo=user-posts&start=2026-10-01&end=2026-10-31` | 博主指定时间段微博 |
+| `https://wx1.sinaimg.cn/large/xxx.jpg` | 图片附件（自动落盘，返回 `/files/<sha256>`） |
+| `https://t.cn/xxxx?weibo=post` | 短链先解析再抓取 |
+
+时间段参数：
+
+| 参数 | 说明 |
+|---|---|
+| `days=N` | 最近 N 天（1–90），与 `start`/`end` 互斥；默认 7 |
+| `start` / `end` | `YYYY-MM-DD`，含边界；只给一端时自动补另一端 |
+| `include_retweets=1` | 包含转发 |
+| `max_items=N` | 本次返回上限（默认 500） |
+
+抓取策略：先整段拉 100 条；返回满 100 条说明可能被截断，就二分区间继续，直到每段不足 100 条。低频博主通常一次调用即可。单日超过 100 条时会在结果末尾提示（adapter 只支持日期粒度）。图片只有数量 `pic_count`，要图请对单条再 `?weibo=post`。
+
+### 微博搜索 / 热搜
+
+搜索走 `search` 工具，不新增工具：
+
+| 请求 | 说明 |
+|---|---|
+| `search(query="洛天依", categories="weibo")` | 只搜微博帖子，不查普通网页 |
+| `search(query="", categories="weibo_hot")` | 微博热搜榜 |
+
+- 需要同时开启 `weibo.enabled` 和 `search.weibo.enabled`。
+- 微博源是网关侧文本源，直接调 OpenCLI，不经过 searxng；自定义类别也不会转发给 searxng。
+- 空结果会自动重试一次（搜索页异步加载），结果缓存 60 秒。
+- 微博搜索只保留微博候选，不召回本地语料，避免混入普通网页。
+
+`?weibo=search` / `?weibo=hot` 不支持的抓取动作仍会返回 `WEIBO_INVALID`；搜索请用上面的 `categories`。
+
+### 图片
+
+- `post` 的 Markdown 里按实际数量列 `![](url)`；转发帖的图片也列。
+- 图片 CDN URL 直接 `fetch`：插件带 `Referer` 下载，走现有 fetch store，返回 `/files/<sha256>`。
+- 不做多图 zip；需要多张就分别 fetch 各图片外链。
+- `wx*.sinaimg.cn` 失败时自动换 `tvax*` 重试一次。
+
+### 服务器部署
+
+```bash
+sudo apt install -y xvfb google-chrome-stable
+Xvfb :99 -screen 0 1280x900x24 &
+DISPLAY=:99 google-chrome-stable \
+  --user-data-dir="$PWD/data/weibo-chrome-profile" \
+  --remote-debugging-port=9222 \
+  --remote-allow-origins='*' \
+  --no-first-run \
+  "https://weibo.com/login"
+# 通过 VNC/远程桌面扫码登录；保持 Chrome 运行
+export OPENCLI_CDP_ENDPOINT=http://127.0.0.1:9222
+opencli weibo whoami -f json
+```
+
+网关与 Chrome 分离时，把 `OPENCLI_CDP_ENDPOINT` 指向 Chrome 所在机器的 `http://<host>:9222`。
+
+登录完成后可以改用无头模式复用同一 profile，不需要 Xvfb/桌面：
+
+```bash
+google-chrome-stable \
+  --headless=new \
+  --user-data-dir="$PWD/data/weibo-chrome-profile" \
+  --remote-debugging-port=9222 \
+  --remote-allow-origins='*' \
+  --no-first-run \
+  about:blank
+export OPENCLI_CDP_ENDPOINT=http://127.0.0.1:9222
+opencli weibo whoami -f json
+```
+
+注意：
+
+- 同一个 `user-data-dir` 同时只能被一个 Chrome 实例使用；切换前先退出有头实例。
+- 首次扫码登录仍建议用有头模式（或 Xvfb + VNC）；登录态写入 profile 后，无头模式可直接复用。
+- 无头模式的 UA 会带 `HeadlessChrome/...`。当前微博抓取/搜索实测可用；若以后遇到风控，可加 `--user-agent` 覆盖成普通 Chrome UA。
+
+### 错误码
+
+| 错误码 | 含义 | 处理 |
+|---|---|---|
+| `WEIBO_UNAVAILABLE` | 未启用 / OpenCLI 不存在 | 检查 `weibo.enabled` 与 `opencli` 命令 |
+| `WEIBO_AUTH_REQUIRED` | 微博未登录 | 在 Chrome 登录 weibo.com，或 `opencli weibo login` |
+| `WEIBO_BRIDGE_DOWN` | Browser Bridge 未连接 | 启动 Chrome/扩展，跑 `opencli doctor` |
+| `WEIBO_TIMEOUT` | 浏览器命令超时 | 调大 `weibo.cli.timeout_ms` |
+| `WEIBO_EMPTY` | 无结果 | 确认帖子可见/有权限 |
+| `WEIBO_IMAGE_FAIL` | 图片下载失败 | 检查 Referer、`max_bytes`、`retry_tvax` |
+
+> `weibo post` 是浏览器操作，单次可能 5–10s。若 Chrome 未连接，OpenCLI 默认会等 45s；把 `OPENCLI_BROWSER_CONNECT_TIMEOUT` 调小（如 20）或把 `weibo.cli.timeout_ms` 设为 45s 以上，才能得到 `WEIBO_BRIDGE_DOWN` 而不是 `WEIBO_TIMEOUT`。
+
+## 一键安装（推荐）
+
+> **0.3.4 起不再支持 Docker 部署，请使用原生安装。**
+
+Linux / macOS：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/djasdh/agent_search_gateway/master/scripts/install.sh | bash
+```
+
+Windows（PowerShell 5.1+）：
+
+```powershell
+irm https://raw.githubusercontent.com/djasdh/agent_search_gateway/master/scripts/install.ps1 | iex
+```
+
+默认安装到 `~/agent_search_gateway`（Windows 为 `%USERPROFILE%\agent_search_gateway`），并完成：
+
+- 下载对应平台完整包（含 `dist/` 与生产 `node_modules/`），SHA256 校验
+- 生成 `gateway.yaml` / `secrets.yaml`（随机 `gateway.token`）
+- 安装 Playwright chromium
+- 安装搜索依赖：
+  - Linux / macOS / Windows：原生源码 + venv（`--searxng-mode` 可选 `auto | native | external`，默认 `auto` 即原生）
+  - Windows：原生 searxng（自动打 `pwd` 补丁）+ 官方 FlareSolverr x64 二进制
+- 注册用户级自启（systemd --user / LaunchAgent / 登录计划任务）
+- 启动并做健康检查
+
+常用参数：
+
+```bash
+# 指定目录
+curl -fsSL .../install.sh | bash -s -- --dir ~/apps/asg
+# 不装浏览器 / 不注册自启
+curl -fsSL .../install.sh | bash -s -- --no-browser --no-service
+# 连接已有 searxng（跳过本地安装）
+curl -fsSL .../install.sh | bash -s -- --searxng-url http://192.168.1.10:8888
+```
+
+代理环境请设置 `HTTPS_PROXY`（或 `https_proxy`）。安装完成后用 `node ~/agent_search_gateway/bin/asg.mjs start` 或注册的服务启动。
+
+## 官方插件
+
+0.3.4 起，Bilibili / 微博 / 知网不再内置，改为官方插件仓库：
+
+```bash
+asg extensions install djasdh/agent-search-gateway-plugin-bilibili@0.1.0
+asg extensions install djasdh/agent-search-gateway-plugin-weibo@0.1.0
+asg extensions install djasdh/agent-search-gateway-plugin-cnki@0.1.0
+asg extensions list
+asg restart
+```
+
+- 插件自己声明 `provides`：`fetch` / `search` / 两者；微博插件同时提供 `fetch` 与搜索源。
+- 安装位置：`data/extensions/<id>/`；卸载用 `asg extensions remove <id>`。
+- 插件与网关同进程运行，没有沙箱；只安装可信来源。
+- 发现：GitHub topic `asg-plugin`；`asg extensions search` 只列仓库，安装仍需显式执行。
+- 详细契约见 [`docs/extensions.md`](docs/extensions.md)；插件开发可把 [`skills/asg-plugin-authoring/`](skills/asg-plugin-authoring/) 交给 AI 使用。
+
+## 快速开始（源码）
 
 ```bash
 git clone https://github.com/djasdh/agent_search_gateway.git
 cd agent_search_gateway
 npm ci                             # 有 package-lock.json，用 ci 可复现
-npx playwright install chromium    # 首次安装浏览器
+npx playwright install chromium --only-shell   # 浏览器工具所需（headed 再跑不带 --only-shell）
 cp gateway.yaml.example gateway.yaml
-./scripts/gateway.sh start           # 启动三件套（searxng/flaresolverr/gateway）
-./scripts/gateway.sh status
+cp secrets.yaml.example secrets.yaml && chmod 600 secrets.yaml   # 填密钥（可留空）
+npm run build                       # 生成 dist/cli（bin/asg.mjs 依赖它）
+node bin/asg.mjs start               # 启动三件套（searxng/flaresolverr/gateway）
+node bin/asg.mjs status
 ```
 
 开发模式单独跑网关：
@@ -145,56 +325,6 @@ npm run dev            # tsx 直接跑
 npm run build && npm start   # 编译后跑
 npm test               # vitest
 ```
-
-## Docker 部署（推荐）
-
-一条命令起全栈（gateway + searxng + flaresolverr）：
-
-```bash
-cd docker
-cp .env.example .env       # 填入 EXA / TAVILY / ZHIHU / EMBEDDING 等密钥
-docker compose up -d        # 本地构建；或改用下方已推送的 ghcr 镜像
-docker compose ps
-```
-
-默认暴露 `127.0.0.1:3000/mcp`（仅本机）。公网部署：
-
-```bash
-GATEWAY_BIND=0.0.0.0 GATEWAY_TOKEN=<strong-token> docker compose up -d
-```
-
-镜像来源：
-
-| 镜像 | 来源 |
-|---|---|
-| `ghcr.io/<owner>/agent-search-gateway` | 本仓库 `Dockerfile`，由 `.github/workflows/docker.yml` 在 CI 构建推送（本地也可 `docker compose build`） |
-| `ghcr.io/<owner>/agent-search-searxng` | 本仓库 `docker/searxng/Dockerfile`（官方 searxng 基镜像 + `searxng-ext/` 引擎/插件） |
-| `ghcr.io/flaresolverr/flaresolverr` | 上游官方镜像 |
-| `mcr.microsoft.com/playwright:*` | 网关基镜像（自带 Node + Playwright 浏览器） |
-
-约定：
-
-- **密钥只经 `.env` → 环境变量注入，不进镜像**。searxng 的 `settings.yml` 由容器启动时从 `docker/searxng/settings.template.yml` 渲染。
-- **配额台账共享**：`quota` 卷同时挂进 searxng 与 gateway（同一路径 `/quota/quota.json`）。
-- 语料库 + 广告过滤缓存在 `corpus` 卷（容器内 `/data`）。
-- **fetch 产物**（图片/PDF 等非文本文件）落在 `corpus` 卷的 `/data/downloads`（`docker/gateway.docker.yaml` 已指向该路径），容器重建不丢。
-- 容器内网关配置为只读挂载的 `docker/gateway.docker.yaml`；改搜索/重排策略改它即可。
-- **出口不经任何代理**：免费 API 引擎直连可达，内置通用爬虫已整体 disabled。
-- **知网学术检索**（`categories=science`）：检索匿名可用；**摘要与取件需要容器出口在机构网段**（会话票据 `LID`），否则只返回标题、取件报 `CNKI_NO_SESSION`。
-
-### 更新
-
-```bash
-cd docker
-git pull                 # 更新 compose 与 gateway.docker.yaml（配置不在镜像里）
-docker compose pull      # 拉取最新 ghcr 镜像（CI 在 master 推送后自动构建）
-docker compose up -d     # 重建容器；quota / corpus 卷保留
-```
-
-- 本地构建：`docker compose build && docker compose up -d`。
-- 只改 `docker/gateway.docker.yaml` 时不必重建镜像，`docker compose up -d` 即可（文件挂载进容器）。
-- searxng 的引擎清单来自镜像内的 `settings.template.yml`，改动需重新构建/拉取 searxng 镜像。
-- `corpus` 卷内含 `fetch` 产物（`/data/downloads`），容器重建不丢。
 
 ## 接入 MCP 客户端
 
@@ -213,7 +343,7 @@ docker compose up -d     # 重建容器；quota / corpus 卷保留
 }
 ```
 
-### 带 token（gateway.yaml 的 gateway.token，或 env GATEWAY_TOKEN）
+### 带 token（secrets.yaml 的 gateway.token，或 env GATEWAY_TOKEN）
 
 ```json
 {
@@ -229,12 +359,20 @@ docker compose up -d     # 重建容器；quota / corpus 卷保留
 
 > 注：不同 MCP 客户端配置字段略有差异（`type`/`headers` 等），按客户端规范调整。
 
-## 配置（gateway.yaml）
+## 配置（gateway.yaml + secrets.yaml）
 
-完整示例见 `gateway.yaml.example`。关键项：
+设置与密钥**分开存放**，两者默认同目录（可用 `GATEWAY_CONFIG_FILE` / `GATEWAY_SECRETS_FILE` 覆盖路径）：
+
+- `gateway.yaml`：非敏感设置。完整示例见 `gateway.yaml.example`，**不接受任何密钥字段**。
+- `secrets.yaml`：只放密钥。模板见 `secrets.yaml.example`，建议 `chmod 600`。
+- 环境变量（`GATEWAY_TOKEN` / `EMBEDDING_API_KEY` / `SAUCENAO_API_KEY` / `BILIBILI_HTTP_TOKEN` / `BROWSER_PROXY_PASSWORD`）优先级最高。
+
+内部实现上，每个组件只接收自己那段设置（如 `search` / `fetch` / `browser`）和需要的密钥，不再拿全量配置。配置在启动时加载一次，修改后需重启。
+
+关键项：
 
 ```yaml
-gateway:        # host/port/token
+gateway:        # host/port（token 在 secrets.yaml）
 logging:        # level/file
 searxng:        # url/timeout_ms
 flaresolverr:   # url/enabled/timeout_ms/max_concurrent/trigger_status/fallback_on_empty
@@ -242,35 +380,11 @@ search:         # max_results/max_results_cap/max_result_chars/cache_ttl_ms/cach
 fetch:          # timeout_ms/max_bytes/user_agent/block_private_ips/structural/max_output_chars/cache_ttl_ms/cache_max_entries/max_download_bytes/download_dir/download_ttl_ms/download_max_total_bytes/files_route
 ad_filter:      # enabled/level(off|ads|ads+tracking|full)/extra_domains/hosts_file/allowlist
 browser:        # enabled/headless/pool_size/idle_ttl_ms/engine(chromium|camoufox预留)/proxy_*/wait_for_selector/screenshot
-embedding:      # enabled/provider(openai|ollama)/base_url/api_key/model/dim/timeout_ms/batch_size/max_input_chars/query_prefix/passage_prefix
+embedding:      # enabled/provider(openai|ollama)/base_url/model/dim/timeout_ms/batch_size/max_input_chars/query_prefix/passage_prefix
 corpus:         # enabled/store_path/ttl_ms/recall_k/sweep_interval_ms
 ```
 
 > 并发作用域：`flaresolverr.max_concurrent` 是**全进程**上限（所有 MCP 会话合计，防止 Chromium 内存线性放大）；`search.max_concurrent` 仍是**每会话**上限（多会话聚合为 N×值，只影响延迟）。
-
-### Wayback 兜底（404/410）
-
-取件链：`direct → (404/410 ? Wayback) → FlareSolverr → playwright`。
-
-**只在原页面明确「不存在」时触发**：403/429 是反爬而非删除，翻存档只会拿到错误内容。
-
-```
-1. GET https://archive.org/wayback/available?url=<原URL>
-2. 有快照 → 抓快照页（静态页，普通 HTTP 即可）
-3. 转 markdown，末尾标注「原页面返回 HTTP 404，以下内容取自 Wayback Machine 存档（YYYY-MM-DD）」
-```
-
-```yaml
-fetch:
-  wayback:
-    enabled: true        # 关掉则 404 原样报错
-    timeout_ms: 5000
-    api_base: https://archive.org/wayback/available   # 仅测试注入用
-```
-
-- 快照超过 5 MB 放弃；
-- archive.org 不可达时静默失败，不影响原错误返回；
-- 缓存按 `wayback` 档位独立分键，不与 direct 混用。
 
 ### fetch 全类型与产物落盘
 
@@ -283,14 +397,14 @@ fetch:
 | `application/pdf` | `unpdf` 抽正文（含页数标注）；扫描件无文本层则落盘 |
 | 图片 / 压缩包 / 其它二进制 | 落盘，返回**本地路径 + `/files/<id>` 链接 + 大小 + sha256**，正文不注入上下文 |
 
-站点专用取件走**取件插件**（`src/fetch/plugins/`）：插件按 host 自报匹配、自管会话与逐跳重定向并完成全部下载，`fetch` 只落盘并给出路径/链接（ADR-0007 / 0009）。当前注册 **CNKI**：知网摘要页 → `#pdfDown` → 跟随 302 链取 `%PDF` 落盘（不在机构网段、未订购、或该文献只有 HTML 阅读版都会给出可读错误）。
+站点专用取件走**取件插件**：插件按 host 自报匹配、自管会话与逐跳重定向并完成全部下载，`fetch` 只落盘并给出路径/链接（ADR-0007 / 0009）。CNKI 由官方插件 `djasdh/agent-search-gateway-plugin-cnki` 提供（`asg extensions install ...`）：知网摘要页 → `#pdfDown` → 跟随 302 链取 `%PDF` 落盘（不在机构网段、未订购、或该文献只有 HTML 阅读版都会给出可读错误）。
 
 产物相关配置（`fetch` 块）：
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `max_download_bytes` | 1073741824（1GB） | 非文本单文件上限；服务端给 `Content-Length` 时**下载前预检**，超出报 `[FETCH_TOO_LARGE]` |
-| `download_dir` | `data/downloads` | 落盘目录（Docker 内为 `/data/downloads`） |
+| `download_dir` | `data/downloads` | 落盘目录 |
 | `download_ttl_ms` | 604800000（7 天） | 产物保留时长 |
 | `download_max_total_bytes` | 4294967296（4GB） | 总量配额，超出按最旧优先清理 |
 | `files_route` | true | 是否提供 `GET /files/<id>` |
@@ -318,9 +432,9 @@ fetch:
 
 | 源 | 承载方 | 覆盖 | 成本 |
 |---|---|---|---|
-| searxng 的 `tineye` | searxng 引擎（上游自带） | 任意图片的"网络出现处"（近似重复匹配） | 需在 searxng 的 `settings.yml` 里给 tineye 声明 `categories: [search_by_image]`（见 `searxng-ext/settings.example.yml` / `docker/searxng/settings.template.yml`）；网关不点名引擎 |
+| searxng 的 `tineye` | searxng 引擎（上游自带） | 任意图片的"网络出现处"（近似重复匹配） | 需在 searxng 的 `settings.yml` 里给 tineye 声明 `categories: [search_by_image]`（见 `searxng-ext/settings.example.yml` / `searxng-ext/settings.template.yml`）；网关不点名引擎 |
 | `tracemoe` | 网关侧附加源 | 动画截图 → 动画出处（AniList 标题/集数/时间点） | 免费、按 IP 100 次/日 |
-| `saucenao` | 网关侧附加源 | **插画 / 同人图出处**（Pixiv / Danbooru / Twitter…） | 免费 key（实测免费账号 100 次/天、4 次/30 秒）；**需在配置里填 `api_key` 才启用** |
+| `saucenao` | 网关侧附加源 | **插画 / 同人图出处**（Pixiv / Danbooru / Twitter…） | 免费 key（实测免费账号 100 次/天、4 次/30 秒）；**需在 `secrets.yaml` 填 `search.reverse_image.saucenao.api_key` 才启用** |
 | `baidu` | 网关侧附加源 | **中文 / 国内图**（完全相同图 + 相似图） | 免费（抓网页、无 key、有风控） |
 
 ```jsonc
@@ -336,7 +450,7 @@ fetch:
 - 失败不致命：**单个源**失败/超时/无匹配都不影响其它源，只在结果末尾各附一条提示（`反向图搜：…`）。
 - **本地图直传**：`tracemoe` / `saucenao` / `baidu` 都以 multipart 直传图片字节，**不经图床**；只有 `tineye` 需要公网 URL（见下）。
 - **部署检查**：searxng 若没声明该类别，请求会被静默过滤、回落成 `general` 搜索（不报错）。验证：`curl -s localhost:8888/config | grep search_by_image`。
-- 相关配置在 `gateway.yaml` 的 `search.reverse_image`（开关 / 触发类别 / `sources` 清单 / 各源地址与超时 / SauceNAO 的 `api_key`）。
+- 非敏感配置在 `gateway.yaml` 的 `search.reverse_image`（开关 / 触发类别 / `sources` 清单 / 各源地址与超时）；SauceNAO 的 `api_key` 在 `secrets.yaml`。
 
 #### 本地图片（`image_path`）
 
@@ -362,21 +476,23 @@ fetch:
 | 文件 | 管什么 | 谁读 | 改后生效 |
 |---|---|---|---|
 | `gateway.yaml` 的 `searxng`/`search` 块 | **怎么调 searxng**：连哪个地址（`searxng.url`）、超时、结果数、缓存 | gateway (node) | 重启 gateway |
-| searxng 的 `settings.yml`（源码运行：`~/Projects/searxng/settings.yml`；Docker：`docker/searxng/settings.template.yml`） | **searxng 内部引擎配置**：启哪些引擎、safesearch、UA | SearXNG 启动时 | 重启 searxng |
+| searxng 的 `settings.yml`（安装版：`data/deps/searxng/settings.yml`，模板：`searxng-ext/settings.template.yml`） | **searxng 内部引擎配置**：启哪些引擎、safesearch、UA | SearXNG 启动时 | 整栈重启 |
 
 要点：
 
-- `gateway.yaml` 的 `searxng.url` 必须指向 searxng 实际端口（源码运行 `127.0.0.1:8888`；Docker 内为服务名 `http://searxng:8080`），flaresolverr 同理（`8192`／`http://flaresolverr:8191`）
+- `gateway.yaml` 的 `searxng.url` 必须指向 searxng 实际端口（默认 `127.0.0.1:8888`），flaresolverr 同理（默认 `127.0.0.1:8192`）
 - settings.yml 是独立配置文件，**不要放 `/tmp`**（重启会丢）
-- Docker 下 `settings.yml` 由 `docker/searxng/entrypoint.sh` 用环境变量渲染，**不要手改容器内文件**
-- 改引擎开关（如启用/禁用某个引擎）只动 settings.yml + 重启 searxng，**不需要动 gateway**
+- `settings.yml` 由一键安装器从 `searxng-ext/settings.template.yml` 渲染；手改后重装会被覆盖，改模板或改生成后的文件并重启
+- 引擎开关用 `asg engines enable/disable <name|group:name>`；searxng 引擎写 settings.yml，网关源写 gateway.yaml，然后整栈重启（会断开 MCP 连接）
+- 引擎路由用 `asg engines route`：searxng 引擎设 `resident` / `rotating` / `none`，文本源设 `--category` / `--hot-category`；密钥用 `asg engines secret <engine> --stdin`（值只从 stdin 读）
+- 裸名冲突时用限定名区分：`searxng:baidu` / `gateway.reverse_image:baidu`；微博搜索用 `gateway.search:weibo`（依赖顶层 `weibo.enabled: true`）
 
 ### 广告过滤（StevenBlack hosts）
 
 - 数据源：StevenBlack/hosts（MIT），本地缓存 `data/adblock/hosts`（gitignore，不入库）
 - 力度：`off` / `ads`（默认）/ `ads+tracking` / `full`（对应不同 hosts 文件）
 - **天级自动拉取**：启动时若 hosts 缺失/过期（`auto_update_interval_ms`，默认 24h）自动拉取；进程内定时器周期检查，到点拉取并自动刷新广告过滤集（无需重启）
-- 手动更新：`./scripts/update-adlist.sh [level]`
+- 手动更新：`node bin/asg.mjs adlist update [--level ads|ads+tracking|full]`
 - 保白名单 `allowlist` 防误杀（wikipedia/github 等）
 
 ### 语义召回与本地语料库（可选）
@@ -388,25 +504,78 @@ fetch:
 - 依赖：`sqlite-vec` 随 npm 安装自带平台二进制，无需手动装扩展。
 - 模型切换：命名空间为 `provider:model@dim`；换模型产生新命名空间，旧向量保留但不参与（多命名空间并存，见 `docs/adr/0001`–`0006`）。
 
-## 管理脚本
+## 后端安装（一个后端一个）
+
+外部后端统一装到 `data/backends/<name>/`，安装/更新后自动把可执行文件路径写回 `gateway.yaml`。
+
+| 后端 | 安装命令 | 说明 |
+|---|---|---|
+| B 站 `bili` CLI | `asg plugins install bili` | PyPI `bili-agent`，需要 Python ≥3.10 |
+| `yt-dlp` | `asg plugins install ytdlp` | 官方独立二进制，自动校验 SHA256 |
+| 微博 `OpenCLI` | `asg plugins install opencli` | npm 包；微博 override 会复制到 `~/.opencli/clis/weibo/` |
+| B 站专栏 HTTP 服务 | `asg plugins install article` | 独立仓库 `djasdh/bilibili-article-server`（GPL-3.0） |
 
 ```bash
-./scripts/gateway.sh start|stop|restart|status|logs [searxng|flaresolverr|gateway|all]
-./scripts/update-adlist.sh [ads|ads+tracking|full]   # 更新广告过滤列表
-./scripts/bench.sh                                    # 本机压测（内存/延迟）
+asg plugins list
+asg plugins install bili
+asg plugins remove bili
 ```
 
-`scripts/gateway.sh` 管理三件套，前置期望（脚本内路径可改）：
-- searxng 源码在 `$HOME/Projects/searxng`（含 `searxng.sh`）
-- FlareSolverr 源码在 `$HOME/Projects/FlareSolverr`（含 .venv，需 conda Xvfb 在 PATH）
+- 安装目录、版本、原配置值都在 `data/backends/<name>/`，`uninstall` 会还原 `gateway.yaml`。
+- `opencli` 只在 `gateway.yaml` 已有 `weibo` 段时写 `weibo.cli.command`；私有分支没有该段时只安装、不写配置。
+- 专栏服务需要登录态：在启动网关的环境里设置 `BILI_COOKIE` 或 `BILI_COOKIE_FILE`，不要写进 `gateway.yaml`。
+- 如果 PATH 里没有 Node，薄包装会自动下载官方 LTS 到 `data/toolchain/node/`。
+- 代理环境：脚本读取 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`，优先用系统 `curl` 下载（Windows 10+ 自带 `curl.exe`）。
 
-> 若你已有自己的 searxng / FlareSolverr（或跑在容器里），不必用 gateway.sh：
+## 网关自更新
+
+```bash
+asg update check                     # 只检查新版本
+asg update apply                     # 更新并重启
+asg update apply --version v0.3.0    # 指定版本
+```
+
+流程：从公开仓库最新正式 Release 下载对应平台完整包 → SHA256 校验 → 解压到 `data/releases/<version>-<platform>/` → 切换 `data/current` → 重启并健康检查 → 失败自动回滚。
+
+- `gateway.yaml`、`secrets.yaml`、`data/` 不随版本切换；更新前请确认已备份密钥。
+- 自更新只切换 `dist/` 与 `node_modules/`；`scripts/` 属于安装器，不随版本覆盖（升级安装器请重新拉取仓库）。
+- 只保留最近 3 个版本；当前/上一版本记录在 `data/installed.json`。
+- 完整包包含生产 `node_modules`，目标机器不需要 npm/tsc；Playwright 浏览器仍需首次 `npx playwright install chromium` 或已有浏览器。
+- 代理环境：脚本读取 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`，优先用系统 `curl` 下载；GitHub API 元数据仍走 Node `fetch`。
+
+## 管理命令 asg
+
+安装后统一用 `$ROOT/bin/asg.mjs`（下文简写 `asg`，可自行加 alias）：
+
+```bash
+asg status [--json]
+asg start | stop | restart                 # 整栈启停
+asg logs [gateway|searxng|flaresolverr|supervisor|all] [-f]
+asg config get|set|validate
+asg engines list [--all] | enable <name|group:name> | disable <name|group:name>
+asg engines route <engine> resident|rotating|none | --category <name> [--hot-category <name>] | --clear
+asg engines secret <engine> [--name <name>] --stdin | --clear
+asg plugins list|install|remove
+asg browser status|install [--full]
+asg adlist update
+asg update check|apply
+asg doctor
+```
+
+约定：
+
+- 生命周期单位是**整栈**，没有单组件重启。
+- 改配置或引擎会**整栈重启**，MCP 连接会断开。
+- 配置文件仍是 `gateway.yaml` / `secrets.yaml`；secrets 只从 stdin 写入，不经过 argv。
+- `asg` 不读环境变量定位安装根：从自身位置向上找 `gateway.yaml`。
+
+> 若你已有自己的 searxng / FlareSolverr：
 > 直接在 `gateway.yaml` 里把 `searxng.url` / `flaresolverr.url` 指向它们，
-> 然后 `npm run build && npm start` 只跑网关本身即可。
+> 然后只跑网关本身即可。
 
 ## 测试与压测
 
-- `npm test`：365 个测试（37 个测试文件）
+- `npm test`：256 个测试（30 个测试文件）
 - `scripts/bench.sh`：测量各组件内存/延迟，验证 3.8GB 预算
 
 实测（本机模拟）：
