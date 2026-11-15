@@ -6,7 +6,7 @@
 #
 # 用法：
 #   ./verify-patches.sh            # 检查本目录
-#   ./verify-patches.sh /opt/asg-035   # 检查指定网关根
+#   ./verify-patches.sh /path/to/asg-root   # 检查指定网关根
 #   退出码 0 = 全部存在；1 = 有缺失
 set -uo pipefail
 
